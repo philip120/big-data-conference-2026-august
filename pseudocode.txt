@@ -1,0 +1,14 @@
+Convert the following MATLAB code into clear, step-by-step pseudocode.
+
+Requirements:
+- Be precise enough that someone could reimplement the code from the pseudocode alone and get identical outputs.
+- Preserve all computed values, loop bounds, conditions, and output statements.
+- Use plain English with math notation where helpful (e.g. x² instead of x.^2).
+- State what is printed or displayed at each output step, including the exact label if one exists.
+- Do not include MATLAB syntax. Write language-agnostic pseudocode.
+- Number each step.
+
+MATLAB code:
+<<<MATLAB_CODE>>>
+
+Pseudocode:

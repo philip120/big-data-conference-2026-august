@@ -1,0 +1,138 @@
+Questions
+1. Does the paper fit into the scope of the ECML-PKDD research track?
+Yes
+2. Please provide a short summary of the paper.
+The paper focuses on methods for generating descriptions of MATLAB code. The result of the paper is that additional AST-derived information can be useful in this task.
+3. Please rate the technical soundness of the paper: Are the claims well supported by theoretical analysis and/or experimental results?
+low (e.g., central claims not verified)
+4. Please rate the contribution to the state of the art of the paper: Is the method or task introduced in this paper original? Or is it a rather incremental advancement of the state-of-the-art?
+medium (e.g., interesting extension of established work)
+5. Please rate the quality of the presentation: Is the paper clearly written? Is it well structured? Is it easy to understand?
+low (clearly below average, merits of the paper are difficult to evaluate because of poor presentation)
+6. Please rate the reproducibility: Does the paper give sufficient information to reproduce the results? Are code and data open source?
+medium (e.g., some information is missing, but that could be fixed)
+7. What are 3 strong points of the paper?
+- Clear basic structure/goal
+- MATLAB code analysis can be a novel idea
+- Several suggested methods
+8. What are 3 weak points of the paper?
+- Strong claims without explanations
+- Why is this specific to MATLAB?
+- It is difficult to understand the example
+9. Please enter a detailed review of the paper that explains the answers to the questions you have given above. Please explain your ratings of technical soundness, novelty, quality of presentation, reproducibility, strong and weak points. Please be specific and constructive, e.g., for weak points that can be improved, add suggestions how they can be improved. If e.g., relevant related work has not been considered, please include the references to this work.
+I'm not sure how this paper is specific to MATLAB. Couldn't you use similar techniques for any other popular programming language?
+
+The abstract discusses a pseudocode generation task, but I don't see pseudocode in the paper.
+
+"Code analysis is the most important aspect of software engineering."
+
+I don't think it's good to have such a strong statement without any references or additional comments.
+
+"Recent research indicates that information extracted from abstract syntax trees (ASTs) is an optimal way to represent code"
+
+What does "optimal" mean here? Optimal in which situations?
+
+Comments on the qualitative example:
+
+I wonder why the last line (with the variable "norm") is not mentioned in the output? If you use any standard LLM, it should be able to explain every line of the code, including the last line.
+10. Please give an overall rating to the paper into the following categories. The numerical scores will be used to rank the papers in the CMT.
+Reject (- 2): below the acceptance bar
+Reviewer #2
+Questions
+1. Does the paper fit into the scope of the ECML-PKDD research track?
+Yes
+2. Please provide a short summary of the paper.
+This paper studies code comprehension for domain-specific MATLAB programs, motivated especially by control engineering settings where MATLAB is underrepresented in typical LLM pretraining corpora. The authors cast comprehension as a pseudocode generation problem and use pseudocode quality as a proxy for understanding. They compare four variants that differ only in how the source code is represented before decoding: a text-only baseline using Qwen’s native tokenizer, a ViT-inspired patch representation built from CodeBERT embeddings, a Tree+Text model that prepends a single RvNN-derived AST summary vector to native text embeddings, and a Tree+ViT model that prepends the same structural vector to the patch sequence.
+
+The experimental study uses 8,000 MATLAB functions with pseudocode annotations for training and 500 evaluation samples. The pseudocode labels are generated using Gemini Flash Lite and only a random sample is manually checked. The main result is that Tree+Text performs best, reaching ROUGE-1 0.692 and ROUGE-L 0.603, compared with 0.571 and 0.483 for the text-only baseline. Both ViT-based variants perform much worse, with ROUGE-1 values around 0.28 to 0.31. The paper further reports efficiency metrics and argues that the AST vector is effectively a low-cost structural augmentation.
+3. Please rate the technical soundness of the paper: Are the claims well supported by theoretical analysis and/or experimental results?
+medium (e.g., some experiments are missing)
+4. Please rate the contribution to the state of the art of the paper: Is the method or task introduced in this paper original? Or is it a rather incremental advancement of the state-of-the-art?
+medium (e.g., interesting extension of established work)
+5. Please rate the quality of the presentation: Is the paper clearly written? Is it well structured? Is it easy to understand?
+medium (e.g., needs some effort to understand but ok after some editing)
+6. Please rate the reproducibility: Does the paper give sufficient information to reproduce the results? Are code and data open source?
+high (information sufficient, code and data accessible)
+7. What are 3 strong points of the paper?
+First, the paper studies an underexplored and practically relevant setting: MATLAB code comprehension, especially motivated by control engineering applications where off-the-shelf LLMs may be weaker due to domain underrepresentation.
+
+Second, the experimental question is well framed. Comparing text-only, ViT-only, Tree+Text, and Tree+ViT under a common decoder gives a useful, controlled perspective on when structural information helps and when alternative representations discard too much lexical signal.
+
+Third, the paper contributes a useful empirical takeaway: prepending a single AST summary vector improves over the text baseline with very small reported overhead, while the ViT-style variants fail badly enough to provide an informative negative result rather than only a positive one. The qualitative example reinforces the aggregate metrics well.
+8. What are 3 weak points of the paper?
+First, the evaluation proxy is weak for a code comprehension claim. Since the pseudocode labels are generated by Gemini and only spot-checked manually, ROUGE/BLEU mostly measure similarity to LLM-authored descriptions rather than direct evidence of semantic understanding. The paper explicitly acknowledges this limitation.
+
+Second, the experimental evidence is not comprehensive enough for the paper’s stronger conclusions. There are no human evaluations, no downstream comprehension tasks, no significance tests, no multi-seed runs, and no ablations on important design choices such as width truncation, patch parameters, or alternative structural fusion strategies. This makes the conclusions suggestive rather than definitive.
+
+Third, reproducibility and dataset characterization are insufficient. The paper claims a control-engineering motivation, but the experiment section does not clearly characterize the source distribution of the MATLAB functions. It also omits several implementation details and does not clearly provide code or a usable dataset link.
+9. Please enter a detailed review of the paper that explains the answers to the questions you have given above. Please explain your ratings of technical soundness, novelty, quality of presentation, reproducibility, strong and weak points. Please be specific and constructive, e.g., for weak points that can be improved, add suggestions how they can be improved. If e.g., relevant related work has not been considered, please include the references to this work.
+This paper asks a sensible and interesting question: for code comprehension in MATLAB, is it better to preserve raw lexical tokens, to inject structure, or to replace the sequence with a patch-style representation? The four-way comparison is one of the strongest aspects of the work. In particular, Tree+Text is easy to understand and the result is intuitive: keep the decoder’s native token processing, then add a compact AST-derived signal that encodes control structure and hierarchy. Within the reported setup, this variant consistently outperforms the text-only baseline and massively outperforms the two ViT-style variants. The qualitative example is especially useful because it shows not just lower overlap but genuine semantic drift in the ViT-based outputs.
+
+I also appreciate that the paper reports efficiency metrics rather than only ROUGE and BLEU. The claim that the AST augmentation is cheap is plausible in the presented setup because it adds only one extra token, and the figures on pages 10 and 11 suggest that Tree+Text keeps latency competitive while reducing output verbosity relative to the text-only baseline. This makes the structural augmentation argument more compelling than if it were purely accuracy-driven.
+
+My main concern is that the paper equates pseudocode generation quality with code comprehension too directly. The references are not human-authored explanations but outputs from another LLM, generated with Gemini Flash Lite and only lightly validated. The paper itself notes that this means the evaluation may reward stylistic overlap rather than actual understanding. For a paper making comprehension claims, I would expect at least one stronger complementary evaluation: human judgment of faithfulness, execution-grounded QA, function-level behavior classification, trace-based reasoning, or even controlled expert scoring on a small benchmark. Without that, the reported ROUGE gains are interesting but not yet decisive.
+
+A second concern is experimental rigor. The paper compares four variants, but several choices remain underexplored. I could not find ablations for patch size, the maximum child-width truncation in the RvNN, the effect of the AST vector without LoRA, or the effect of fully end-to-end tuning versus the two-stage pipeline. There are also no multi-seed results or significance tests. This matters because the paper draws a fairly strong conclusion that ViT-inspired patch encoding is unsuitable for code comprehension, whereas the evidence really shows that this particular patching formulation performs poorly in this experimental setting. A more careful wording would be better, unless further ablations are added.
+
+A third concern is the limited characterization of the data and the domain. The paper motivates the task using control engineering systems and MATLAB’s role in that domain, but the dataset section only states that the samples are MATLAB functions paired with generated pseudocode and that 300 flat scripts were removed. It does not clearly characterize the provenance, complexity, control-structure distribution, typical length, or how specifically “control engineering” the data really is. This makes it difficult to assess how well the claims match the actual benchmark.
+
+In terms of presentation, the paper is understandable, but it needs editing. Several sentences are grammatically awkward, some claims are too categorical, and the framing around “first attempt” and “unsuitable” would benefit from more caution. I would encourage the authors to tighten the writing, better separate empirical observations from broader claims, and sharpen the relation to prior structure-aware code models already cited in the references.
+
+Overall, I see this as an interesting and potentially useful empirical study with a good core idea and a valuable negative result. However, for a PKDD research-track acceptance, I would want stronger validation of the “comprehension” claim, more complete experimental rigor, and better reproducibility. My recommendation is therefore slightly below the bar in its current form.
+10. Please give an overall rating to the paper into the following categories. The numerical scores will be used to rank the papers in the CMT.
+Weak reject (- 1): borderline, tending to reject
+Reviewer #3
+Questions
+1. Does the paper fit into the scope of the ECML-PKDD research track?
+Yes
+2. Please provide a short summary of the paper.
+Description: The presented article deals with the subject of code comprehension using language models. The domain of code comprehension is specifically restricted to the coding language MATLAB, due to its under-representation in this task. The authors approach the problem through the perspective of pseudocode generation by the language models. The language model that is being used is the “Qwen3-4B-Instruct”. The core contribution of the article is that it provides a comparative study for different adaptations of encoding schemes, in the encoder-decoder architecture of the language models. Specifically, they consider the following cases of encoding:
+- (i) text-only encoding using the decoder’s native tokenizer,
+- (ii) ViT-style patch encoding of CodeBERT embeddings,
+- (iii) text encoding augmented with a Recursive Neural Network (RvNN) derived AST summary vector,
+- (iv) patch encoding augmented with an RvNN over the AST.
+Each case is tested on a collection of MATLAB functions paired with pseudocode annotations. The results of these runs are then discussed and analyzed, providing insights into the performance of the four deployed architectures.
+3. Please rate the technical soundness of the paper: Are the claims well supported by theoretical analysis and/or experimental results?
+medium (e.g., some experiments are missing)
+4. Please rate the contribution to the state of the art of the paper: Is the method or task introduced in this paper original? Or is it a rather incremental advancement of the state-of-the-art?
+medium (e.g., interesting extension of established work)
+5. Please rate the quality of the presentation: Is the paper clearly written? Is it well structured? Is it easy to understand?
+medium (e.g., needs some effort to understand but ok after some editing)
+6. Please rate the reproducibility: Does the paper give sufficient information to reproduce the results? Are code and data open source?
+high (information sufficient, code and data accessible)
+7. What are 3 strong points of the paper?
+- Spotting and addressing an under-represented (sub)section of a domain enhances the utility of the presented work.
+- Incorporating and fusing AST encodings with regular LLM practices to enhance the performance of LLMs in code comprehension seems like a promising work-around.
+- The two-stage training of fine-tuning the Qwen model and the projector training is genuinely performed and explained.
+8. What are 3 weak points of the paper?
+- (Writing) I may be wrong, but it seems to me there is an inconsistency with the abstract and certain statements in the introduction. The abstract focuses on the empirical evaluation of four different adaptations for the encoding scheme used in the LLM. The introduction claims that the fusing of regular language encoding of LLMs with the AST encoding is being proposed with this work.
+- (Experiments) I am not sure if I agree with practice of using a LLM to create the annotations of the dataset, especially when only a fraction of them is inspected. The quality of the training samples is not guaranteed that way.
+- (Experiments) Τwo of the baselines are doing way worse than the text-only case (simplest). This is probably an indication of poor choice of baselines models.
+9. Please enter a detailed review of the paper that explains the answers to the questions you have given above. Please explain your ratings of technical soundness, novelty, quality of presentation, reproducibility, strong and weak points. Please be specific and constructive, e.g., for weak points that can be improved, add suggestions how they can be improved. If e.g., relevant related work has not been considered, please include the references to this work.
+Description: The presented article deals with the subject of code comprehension using language models. The domain of code comprehension is specifically restricted to the coding language MATLAB, due to its under-representation in this task. The authors approach the problem through the perspective of pseudocode generation by the language models. The language model that is being used is the “Qwen3-4B-Instruct”. The core contribution of the article is that it provides a comparative study for different adaptations of encoding schemes, in the encoder-decoder architecture of the language models. Specifically, they consider the following cases of encoding:
+- (i) text-only encoding using the decoder’s native tokenizer,
+- (ii) ViT-style patch encoding of CodeBERT embeddings,
+- (iii) text encoding augmented with a Recursive Neural Network (RvNN) derived AST summary vector,
+- (iv) patch encoding augmented with an RvNN over the AST.
+Each case is tested on a collection of MATLAB functions paired with pseudocode annotations. The results of these runs are then discussed and analyzed, providing insights into the performance of the four deployed architectures.
+Below I discuss the main positive and negative aspects of article that I identified:
+
+Positives:
+- Spotting and addressing an under-represented (sub)section of a domain enhances the utility of the presented work.
+- Incorporating and fusing AST encodings with regular LLM practices to enhance the performance of LLMs in code comprehension seems like a promising work-around.
+- The two-stage training of fine-tuning the Qwen model and the projector training is genuinely performed and explained.
+
+Negatives:
+- (Writing) I may be wrong, but it seems to me there is an inconsistency with the abstract and certain statements in the introduction. The abstract focuses on the empirical evaluation of four different adaptations for the encoding scheme used in the LLM. The introduction claims that the fusing of regular language encoding of LLMs with the AST encoding is being proposed with this work (see “… In this work we propose a novel method …”).
+- (Writing) If the comment above about the introduction claims stand, then I assume the proposed method is the third one in the experiments (Text+RvNN)? It is not presented clearly, nor promoted as the proposed methodology.
+- (Writing) The RQ1 statement at the end of the introduction seems like an overstatement to me, as it had been addressed before (I suppose even at your references [11,35] on tokenization). Maybe it would be more accurate if rephrased specifically for MATLAB.
+- (Writing) Again about statements of what is being proposed or simply investigated, the authors state in the contributions that they are proposing four architectures. To my understanding, the work essentially examines four different encoding schemes and proposes one of them based on the acquired results.
+- (Writing) The first and second sentences of paragraph 4.1 are incomplete. I believe I got the main idea (raw code as input to the LLM decoder), but still this should have been missed in my opinion.
+- (Experiments) I am not sure if I agree with practice of using a LLM to create the annotations of the dataset, especially when only a fraction of them is inspected. The quality of the training samples is not guaranteed that way. Out-of-sample testing where the annotations are guaranteed to be correct is necessary in such a case, but from my understanding not all test cases are validated.
+- (Experiments) Based on Figure 3, two of the baselines are doing way worse than the text-only case (simplest). This is probably an indication of poor choice of baselines models – maybe different architectures should have been considered, so that the effectiveness of the proposed method is properly established.
+- (Coverage) While the scope is declared as specific from the start of the article, in my opinion it would have been way more beneficial to create a generalization of the results by testing the framework of (Tree + ViT) on more scenarios – i.e., on more languages, structured like MATLAB. Whether you had applied the while pipeline or simply extrapolated on out-of-sample cases, this would have helped to generalize the study and show how the method performs under different scenarios.
+
+Conclusion:
+The presented work proposes a sophisticated adaptation on the encoding scheme of the input on the task of code comprehension. While the work is insightful and certainly in the right direction, I believe that the observations above (especially concerning the way the work was written, the employed dataset and the examined scope) puts the work, at least in my opinion, close but below the acceptance threshold.
+10. Please give an overall rating to the paper into the following categories. The numerical scores will be used to rank the papers in the CMT.
+Reject (- 2): below the acceptance bar

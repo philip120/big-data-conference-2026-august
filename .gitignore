@@ -1,0 +1,29 @@
+# Secrets
+.env
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Scratch / test artifacts
+temp/
+test_output/
+test_*.mat
+test_matrix.smat
+
+# Generated experiment data (regeneratable)
+results/
+rand_indices/
+
+# Optional: uncomment if you publish the dataset elsewhere (HuggingFace, etc.)
+dataset/sc_matlab_validated/
