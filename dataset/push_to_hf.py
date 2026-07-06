@@ -1,6 +1,12 @@
-"""Upload sc_matlab_validated samples to the Hugging Face Hub."""
+"""Upload sc_matlab_validated samples to the Hugging Face Hub.
+
+Samples are split into train/test deterministically by a content hash of the
+code, so the same sample always lands in the same split even as the dataset
+grows across pushes. The test split is never seen during training.
+"""
 
 import argparse
+import hashlib
 from pathlib import Path
 
 from datasets import Dataset, DatasetDict
@@ -60,9 +66,13 @@ converted to pseudocode with Gemini, regenerated back to MATLAB, and kept only w
 ```python
 from datasets import load_dataset
 
-ds = load_dataset("philip120/sc-matlab-validated", split="train")
-print(ds[0]["pseudocode"])
+train = load_dataset("philip120/sc-matlab-validated", split="train")
+test = load_dataset("philip120/sc-matlab-validated", split="test")
+print(train[0]["pseudocode"])
 ```
+
+The train/test split is deterministic by content hash of `code`, so samples
+never migrate between splits as the dataset grows.
 """
 
 
@@ -87,20 +97,40 @@ def load_samples(data_dir: Path) -> list[dict]:
     return records
 
 
+def assign_split(code: str, test_fraction: float) -> str:
+    """Deterministic train/test assignment from a content hash of the code.
+
+    Stable across pushes: a sample keeps its split as the dataset grows,
+    so the test set is never contaminated by retraining on a re-push.
+    """
+    digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    bucket = int(digest[:8], 16) / 0xFFFFFFFF
+    return "test" if bucket < test_fraction else "train"
+
+
 def push_dataset(
     repo_id: str,
     data_dir: Path,
     *,
     private: bool = False,
     dry_run: bool = False,
+    test_fraction: float = 0.1,
 ) -> None:
     records = load_samples(data_dir)
     kinds = {}
     for row in records:
         kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
 
+    train_records = []
+    test_records = []
+    for row in records:
+        (test_records if assign_split(row["code"], test_fraction) == "test"
+         else train_records).append(row)
+
     print(f"Loaded {len(records)} samples from {data_dir}")
     print(f"Kinds: {kinds}")
+    print(f"Split: {len(train_records)} train / {len(test_records)} test "
+          f"(test_fraction={test_fraction}, content-hash deterministic)")
 
     if dry_run:
         print(f"Dry run: would push to https://huggingface.co/datasets/{repo_id}")
@@ -109,10 +139,13 @@ def push_dataset(
     api = HfApi()
     api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
 
-    dataset = Dataset.from_list(records)
-    DatasetDict({"train": dataset}).push_to_hub(
+    DatasetDict({
+        "train": Dataset.from_list(train_records),
+        "test": Dataset.from_list(test_records),
+    }).push_to_hub(
         repo_id,
-        commit_message=f"Upload {len(records)} validated MATLAB samples",
+        commit_message=f"Upload {len(records)} validated MATLAB samples "
+                       f"({len(train_records)} train / {len(test_records)} test)",
     )
 
     api.upload_file(
@@ -133,9 +166,12 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Local validated dataset directory")
     parser.add_argument("--private", action="store_true", help="Create/update as a private dataset")
     parser.add_argument("--dry-run", action="store_true", help="Load and summarize without uploading")
+    parser.add_argument("--test-fraction", type=float, default=0.1,
+                        help="Fraction of samples routed to the held-out test split")
     args = parser.parse_args()
 
-    push_dataset(args.repo_id, args.data_dir, private=args.private, dry_run=args.dry_run)
+    push_dataset(args.repo_id, args.data_dir, private=args.private, dry_run=args.dry_run,
+                 test_fraction=args.test_fraction)
 
 
 if __name__ == "__main__":

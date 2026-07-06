@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 
 from model2.semantic_extractor import SemanticExtractorV2
-from shared.codebert_encoder import CodeBERTEncoder
+from shared.code_encoder import CodeEncoder
 from shared.patch_embedder import PatchEmbedder
 from shared.projector import Projector, NonLinearProjector, embedding_rms
 from shared.decoder_factory import create_decoder
@@ -46,6 +46,8 @@ class CombinedSemanticViT(nn.Module):
         dropout: float = 0.4,
         decoder_name: str = "qwen",
         projector_arch: str = "linear",  # "linear" | "mlp"
+        encoder_name: str = "codebert",
+        max_branching: int = 8,
     ):
         super().__init__()
 
@@ -55,17 +57,18 @@ class CombinedSemanticViT(nn.Module):
         self.extractor = SemanticExtractorV2()
 
         # Base Encoder (frozen)
-        self.encoder = CodeBERTEncoder(device=DEVICE)
+        self.encoder = CodeEncoder(preset=encoder_name, device=DEVICE)
+        enc_dim = self.encoder.hidden_size
 
         # --- DECODER (created first so we can read hidden_size) ---
         self.decoder = create_decoder(decoder_name, device=DEVICE)
         dec_dim = self.decoder.hidden_size
 
         # --- PATH 1: SEQUENTIAL (ViT) ---
-        self.patch_embedder = PatchEmbedder(patch_size=patch_size)
+        self.patch_embedder = PatchEmbedder(patch_size=patch_size, embed_dim=enc_dim)
         if projector_arch == "mlp":
             self.projector = NonLinearProjector(
-                in_dim=patch_size * 768,
+                in_dim=patch_size * enc_dim,
                 hidden_dim=dec_dim,
                 out_dim=dec_dim,
                 dropout=dropout,
@@ -73,7 +76,7 @@ class CombinedSemanticViT(nn.Module):
             ).to(DEVICE)
         else:
             self.projector = Projector(
-                in_dim=patch_size * 768,
+                in_dim=patch_size * enc_dim,
                 bottleneck_dim=bottleneck_dim,
                 out_dim=dec_dim,
                 dropout=dropout
@@ -82,13 +85,13 @@ class CombinedSemanticViT(nn.Module):
         # --- PATH 2: STRUCTURAL (RvNN) ---
         # No LayerNorm: pins norm to sqrt(dec_dim), causing the global_vector
         # to dominate the decoder's residual stream.
-        # Kaiming init on Linear(768, dec_dim) gives output norm close to
+        # Kaiming init on Linear(enc_dim, dec_dim) gives output norm close to
         # decoder token norms.
-        self.pixel_adapter = nn.Linear(768, dec_dim).to(DEVICE)
+        self.pixel_adapter = nn.Linear(enc_dim, dec_dim).to(DEVICE)
 
         self.recursive_encoder = RecursiveEncoder(
             embed_dim=dec_dim,
-            max_branching=8,
+            max_branching=max_branching,
             hidden_dim=dec_dim * 2,
             dropout=dropout
         ).to(DEVICE)

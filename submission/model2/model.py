@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from .semantic_extractor import SemanticExtractorV2
-from shared.codebert_encoder import CodeBERTEncoder
+from shared.code_encoder import CodeEncoder
 from shared.decoder_factory import create_decoder
 from .recursive_encoder import RecursiveEncoder
 
@@ -30,6 +30,8 @@ class StructuralModel(nn.Module):
         self,
         dropout: float = 0.4,
         decoder_name: str = "qwen",
+        encoder_name: str = "codebert",
+        max_branching: int = 8,
     ):
         super().__init__()
 
@@ -37,21 +39,22 @@ class StructuralModel(nn.Module):
         self.extractor = SemanticExtractorV2()
 
         # Base Encoder (frozen)
-        self.encoder = CodeBERTEncoder(device=DEVICE)
+        self.encoder = CodeEncoder(preset=encoder_name, device=DEVICE)
+        enc_dim = self.encoder.hidden_size
 
         # Decoder (created first so we can read hidden_size)
         self.decoder = create_decoder(decoder_name, device=DEVICE)
         dec_dim = self.decoder.hidden_size
 
-        # Adapt pixel (768) to Recursive dim
+        # Adapt pixel (enc_dim) to Recursive dim
         # No LayerNorm: would pin output norm to sqrt(dec_dim),
         # causing the global_vector to dominate the decoder's residual stream.
-        self.pixel_adapter = nn.Linear(768, dec_dim).to(DEVICE)
+        self.pixel_adapter = nn.Linear(enc_dim, dec_dim).to(DEVICE)
 
         # Recursive Encoder (tree aggregation)
         self.recursive_encoder = RecursiveEncoder(
             embed_dim=dec_dim,
-            max_branching=8,
+            max_branching=max_branching,
             hidden_dim=dec_dim * 2,
             dropout=dropout
         ).to(DEVICE)

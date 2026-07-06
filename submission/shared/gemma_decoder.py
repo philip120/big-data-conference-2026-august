@@ -305,17 +305,22 @@ class GemmaDecoder:
         self,
         projected: torch.Tensor,    # [num_patches, D]
         max_new_tokens: int = 128,
+        do_sample: bool = False,
         temperature: float = 0.7,
         top_p: float = 0.9,
     ) -> str:
         """
         Generate text from projected embeddings.
 
+        Greedy by default so evaluation metrics are deterministic;
+        pass do_sample=True for sampled generation.
+
         Args:
             projected: [num_patches, D] from Projector
             max_new_tokens: max tokens to generate
-            temperature: sampling temperature
-            top_p: nucleus sampling threshold
+            do_sample: enable nucleus sampling (default: greedy)
+            temperature: sampling temperature (ignored when greedy)
+            top_p: nucleus sampling threshold (ignored when greedy)
 
         Returns:
             generated text string
@@ -335,14 +340,16 @@ class GemmaDecoder:
         attention_mask = torch.cat([patch_mask, prompt_tokens.attention_mask], dim=1)
 
         # Generate
+        sampling_kwargs = (
+            {"do_sample": True, "temperature": temperature, "top_p": top_p}
+            if do_sample else {"do_sample": False}
+        )
         outputs = self.model.generate(
             inputs_embeds=input_embeds,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=temperature,
-            top_p=top_p,
             pad_token_id=self.tokenizer.eos_token_id,
+            **sampling_kwargs,
         )
 
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -352,10 +359,11 @@ class GemmaDecoder:
         self,
         projected: torch.Tensor,
         max_new_tokens: int = 128,
+        do_sample: bool = False,
         temperature: float = 0.7,
         top_p: float = 0.9,
     ) -> tuple:
-        """Generate text and return (text, metrics_dict)."""
+        """Generate text and return (text, metrics_dict). Greedy by default."""
         projected = projected.unsqueeze(0).to(self.model.dtype)
         prompt_embeds, prompt_tokens = self.get_input_embeddings(PROMPT)
         input_embeds = torch.cat([projected, prompt_embeds], dim=1)
@@ -369,14 +377,16 @@ class GemmaDecoder:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
 
+        sampling_kwargs = (
+            {"do_sample": True, "temperature": temperature, "top_p": top_p}
+            if do_sample else {"do_sample": False}
+        )
         outputs = self.model.generate(
             inputs_embeds=input_embeds,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=temperature,
-            top_p=top_p,
             pad_token_id=self.tokenizer.eos_token_id,
+            **sampling_kwargs,
         )
 
         if self.device == "cuda":

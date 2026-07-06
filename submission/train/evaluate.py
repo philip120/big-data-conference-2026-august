@@ -30,6 +30,7 @@ from pathlib import Path
 from datasets import load_dataset
 from rouge_score import rouge_scorer
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from nltk.translate.chrf_score import sentence_chrf
 
 # Import decoder factory directly to avoid shared/__init__.py pulling in ANTLR
 import importlib
@@ -47,6 +48,9 @@ def load_stage2_model(checkpoint_path, lora_rank, lora_alpha, lora_dropout,
     model_type = ckpt.get("model_type", "combined")
     decoder_name = decoder_name or ckpt.get("decoder_name", "qwen")
     projector_arch = ckpt.get("projector_arch", "linear")
+    encoder_name = ckpt.get("encoder_name", "codebert")
+    max_branching = ckpt.get("max_branching", 8)
+    patch_size = ckpt.get("patch_size", patch_size)
 
     # Infer patch_size and bottleneck_dim from saved projector weights if present
     if "model_state" in ckpt:
@@ -65,18 +69,21 @@ def load_stage2_model(checkpoint_path, lora_rank, lora_alpha, lora_dropout,
         from model.model import SemanticViT
         model = SemanticViT(patch_size=patch_size, bottleneck_dim=bottleneck_dim,
                             dropout=dropout, decoder_name=decoder_name,
-                            projector_arch=projector_arch)
+                            projector_arch=projector_arch, encoder_name=encoder_name)
     elif model_type == "tree":
         from model2.model import StructuralModel
-        model = StructuralModel(dropout=dropout, decoder_name=decoder_name)
+        model = StructuralModel(dropout=dropout, decoder_name=decoder_name,
+                                encoder_name=encoder_name, max_branching=max_branching)
     elif model_type == "tree_text":
         from tree_text_model.model import TreeTextModel
-        model = TreeTextModel(dropout=dropout, decoder_name=decoder_name)
+        model = TreeTextModel(dropout=dropout, decoder_name=decoder_name,
+                              encoder_name=encoder_name, max_branching=max_branching)
     else:
         from combined_model.model import CombinedSemanticViT
         model = CombinedSemanticViT(patch_size=patch_size, bottleneck_dim=bottleneck_dim,
                                     dropout=dropout, decoder_name=decoder_name,
-                                    projector_arch=projector_arch)
+                                    projector_arch=projector_arch,
+                                    encoder_name=encoder_name, max_branching=max_branching)
 
     # Restore encoder weights
     if "model_state" in ckpt:
@@ -147,7 +154,7 @@ def load_stage1_decoder(checkpoint_path, lora_rank, lora_alpha, lora_dropout,
 def generate_stage1(decoder, code: str, max_new_tokens: int = 128):
     """Generate pseudocode using Stage 1 decoder (text-only, no encoder).
     Returns (text, efficiency_metrics)."""
-    prompt = f"Convert the following MATLAB code to pseudocode:\n{code}\nPseudocode:"
+    prompt = f"Convert the following MATLAB code to step-by-step pseudocode:\n{code}\nPseudocode:"
     tokens = decoder.tokenizer(
         prompt, return_tensors="pt", truncation=True, max_length=512
     ).to(decoder.device)
@@ -159,13 +166,12 @@ def generate_stage1(decoder, code: str, max_new_tokens: int = 128):
         torch.cuda.synchronize()
 
     t0 = time.perf_counter()
+    # Greedy decoding: evaluation must be deterministic
     output_ids = decoder.model.generate(
         input_ids=tokens.input_ids,
         attention_mask=tokens.attention_mask,
         max_new_tokens=max_new_tokens,
-        do_sample=True,
-        temperature=0.7,
-        top_p=0.9,
+        do_sample=False,
     )
     if decoder.device == "cuda":
         torch.cuda.synchronize()
@@ -211,10 +217,14 @@ def main():
                         help="Path to checkpoint file")
     parser.add_argument("--num_samples", type=int, default=20)
     parser.add_argument("--max_tokens", type=int, default=512)
+    parser.add_argument("--split", type=str, default="test",
+                        help="HF dataset split to evaluate on (default: held-out test)")
     parser.add_argument("--max_code_chars", type=int, default=None,
                         help="Skip code samples longer than this (in characters)")
+    parser.add_argument("--results_dir", type=str, default="results",
+                        help="Directory for results JSON (point at Drive in Colab)")
     parser.add_argument("--output_path", type=str, default=None,
-                        help="Path to save results JSON (default: eval_<model_type>.json)")
+                        help="Explicit results JSON path (overrides --results_dir)")
 
     # Model params (must match training)
     parser.add_argument("--lora_rank", type=int, default=16)
@@ -228,7 +238,12 @@ def main():
                         choices=["gemma", "qwen"])
 
     args = parser.parse_args()
-    output_path = args.output_path or f"eval_{args.model_type}.json"
+    if args.output_path:
+        output_path = args.output_path
+    else:
+        from pathlib import Path
+        Path(args.results_dir).mkdir(parents=True, exist_ok=True)
+        output_path = str(Path(args.results_dir) / f"eval_{args.model_type}.json")
 
     print(f"Evaluating: {args.model_type}")
     print(f"Checkpoint: {args.checkpoint}")
@@ -248,16 +263,15 @@ def main():
         decoder = None
         print(f"Detected model type from checkpoint: {detected_type}")
 
-    # Load eval data
-    print(f"\nLoading eval samples from HuggingFace...")
-    hf_data = load_dataset("dataset", split="train[-20%:]") #hided for submission
+    # Load eval data from the held-out test split (never seen in training)
+    print(f"\nLoading eval samples from HuggingFace (split={args.split})...")
+    from train.load_dataset import load_matlab_nl_dataset
+    hf_data = load_matlab_nl_dataset(args.split)
     eval_samples = []
     for item in hf_data:
         code = item.get("code", "")
         nl = item.get("nl", "")
         if not code or not nl:
-            continue
-        if code.lstrip().startswith("classdef"):
             continue
         if args.max_code_chars and len(code) > args.max_code_chars:
             continue
@@ -297,6 +311,12 @@ def main():
             smoothing_function=smoother
         )
 
+        # chrF (character n-gram F-score; more robust than BLEU for prose)
+        try:
+            chrf = sentence_chrf(reference, generated)
+        except (ValueError, ZeroDivisionError):
+            chrf = 0.0
+
         results.append({
             "code": code,
             "reference_description": reference,
@@ -306,6 +326,7 @@ def main():
                 "rouge2": scores['rouge2'].fmeasure,
                 "rougeL": scores['rougeL'].fmeasure,
                 "bleu": bleu,
+                "chrf": chrf,
             },
             "efficiency": eff_metrics,
         })
@@ -326,6 +347,7 @@ def main():
         avg_r2 = sum(r["metrics"]["rouge2"] for r in results) / n
         avg_rl = sum(r["metrics"]["rougeL"] for r in results) / n
         avg_bleu = sum(r["metrics"]["bleu"] for r in results) / n
+        avg_chrf = sum(r["metrics"]["chrf"] for r in results) / n
 
         # Efficiency averages
         def eff_avg(key):
@@ -339,6 +361,7 @@ def main():
         print(f"  ROUGE-2:           {avg_r2:.4f}")
         print(f"  ROUGE-L:           {avg_rl:.4f}")
         print(f"  BLEU:              {avg_bleu:.4f}")
+        print(f"  chrF:              {avg_chrf:.4f}")
         print(f"  --- Efficiency ---")
         print(f"  Encode time:       {eff_avg('encode_time_s'):.3f}s")
         print(f"  Generate time:     {eff_avg('generate_time_s'):.3f}s")

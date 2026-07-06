@@ -18,6 +18,13 @@ class RecursiveEncoder(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.max_branching = max_branching
+
+        # Truncation telemetry: how often aggregate_children drops children
+        # because a node has more than max_branching of them. Read via
+        # truncation_stats() and reset via reset_truncation_stats().
+        self.truncated_aggregations = 0
+        self.total_aggregations = 0
+        self.dropped_children = 0
         
         # Input dimension: Self Vector + Children Vectors
         # Children are flattened: max_branching * embed_dim
@@ -48,7 +55,12 @@ class RecursiveEncoder(nn.Module):
         """
         B, N, D = child_vectors.shape
         device = child_vectors.device
-        
+
+        self.total_aggregations += 1
+        if N > self.max_branching:
+            self.truncated_aggregations += 1
+            self.dropped_children += N - self.max_branching
+
         if debug:
             print(f"\n--- [RvNN Aggregation] ---")
             print(f"Input Children: {N} vectors")
@@ -78,6 +90,22 @@ class RecursiveEncoder(nn.Module):
             print("--------------------------\n")
             
         return output
+
+    def truncation_stats(self) -> dict:
+        """Fraction of aggregations that silently dropped children."""
+        return {
+            "max_branching": self.max_branching,
+            "total_aggregations": self.total_aggregations,
+            "truncated_aggregations": self.truncated_aggregations,
+            "truncation_rate": (self.truncated_aggregations / self.total_aggregations
+                                if self.total_aggregations else 0.0),
+            "dropped_children": self.dropped_children,
+        }
+
+    def reset_truncation_stats(self):
+        self.truncated_aggregations = 0
+        self.total_aggregations = 0
+        self.dropped_children = 0
 
     def forward_tree(self, nodes: List, pixel_embeddings: torch.Tensor, debug: bool = False) -> torch.Tensor:
         """

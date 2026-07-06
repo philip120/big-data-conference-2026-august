@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from shared.semantic_extractor import SemanticExtractor
-from shared.codebert_encoder import CodeBERTEncoder
+from shared.code_encoder import CodeEncoder
 from shared.patch_embedder import PatchEmbedder
 from shared.projector import Projector, NonLinearProjector, embedding_rms
 from shared.decoder_factory import create_decoder
@@ -33,6 +33,7 @@ class SemanticViT(nn.Module):
         dropout: float = 0.4,
         decoder_name: str = "qwen",
         projector_arch: str = "linear",  # "linear" | "mlp"
+        encoder_name: str = "codebert",
     ):
         super().__init__()
 
@@ -42,11 +43,12 @@ class SemanticViT(nn.Module):
         # Extractor (not nn.Module)
         self.extractor = SemanticExtractor()
 
-        # CodeBERT (frozen, not nn.Module)
-        self.encoder = CodeBERTEncoder(device=DEVICE)
+        # Code encoder (frozen, not nn.Module)
+        self.encoder = CodeEncoder(preset=encoder_name, device=DEVICE)
+        enc_dim = self.encoder.hidden_size
 
         # Patch embedder
-        self.patch_embedder = PatchEmbedder(patch_size=patch_size)
+        self.patch_embedder = PatchEmbedder(patch_size=patch_size, embed_dim=enc_dim)
 
         # Decoder (frozen, not nn.Module — created before projector to read hidden_size)
         self.decoder = create_decoder(decoder_name, device=DEVICE)
@@ -55,7 +57,7 @@ class SemanticViT(nn.Module):
         # Projector (TRAINABLE)
         if projector_arch == "mlp":
             self.projector = NonLinearProjector(
-                in_dim=patch_size * 768,
+                in_dim=patch_size * enc_dim,
                 hidden_dim=dec_dim,
                 out_dim=dec_dim,
                 dropout=dropout,
@@ -63,7 +65,7 @@ class SemanticViT(nn.Module):
             ).to(DEVICE)
         else:
             self.projector = Projector(
-                in_dim=patch_size * 768,
+                in_dim=patch_size * enc_dim,
                 bottleneck_dim=bottleneck_dim,
                 out_dim=dec_dim,
                 dropout=dropout,

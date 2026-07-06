@@ -23,21 +23,29 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-# Add ANTLR parser to path
-_antlr_parser_dir = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "grammars-v4", "matlab"
-)
-if _antlr_parser_dir not in sys.path:
-    sys.path.insert(0, _antlr_parser_dir)
+# Add ANTLR parser to path. The generated matlabLexer/matlabParser may live
+# either inside submission/ or one level up at the repo root.
+_submission_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ANTLR_CANDIDATE_DIRS = [
+    os.path.join(_submission_dir, "grammars-v4", "matlab"),
+    os.path.join(os.path.dirname(_submission_dir), "grammars-v4", "matlab"),
+]
+for _d in _ANTLR_CANDIDATE_DIRS:
+    if os.path.isfile(os.path.join(_d, "matlabParser.py")) and _d not in sys.path:
+        sys.path.insert(0, _d)
+        break
 
 try:
     from antlr4 import InputStream, CommonTokenStream
     from matlabLexer import matlabLexer
     from matlabParser import matlabParser
     ANTLR_AVAILABLE = True
+    print("[semantic_adapter] AST parser: ANTLR (grammars-v4/matlab)")
 except ImportError:
     ANTLR_AVAILABLE = False
+    print("[semantic_adapter] WARNING: ANTLR parser not found — using regex "
+          "fallback. Tree structure will be approximate. Expected generated "
+          "parser at one of: " + ", ".join(_ANTLR_CANDIDATE_DIRS))
 
 
 @dataclass

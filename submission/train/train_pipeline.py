@@ -42,7 +42,8 @@ if DEVICE == "cuda":
 
 
 def create_model(model_type: str, patch_size: int, bottleneck_dim: int, dropout: float,
-                 decoder_name: str = "qwen", projector_arch: str = "linear"):
+                 decoder_name: str = "qwen", projector_arch: str = "linear",
+                 encoder_name: str = "codebert", max_branching: int = 8):
     """Create model based on type selection."""
     if model_type == "vit":
         from model.model import SemanticViT
@@ -52,12 +53,15 @@ def create_model(model_type: str, patch_size: int, bottleneck_dim: int, dropout:
             dropout=dropout,
             decoder_name=decoder_name,
             projector_arch=projector_arch,
+            encoder_name=encoder_name,
         )
     elif model_type == "tree":
         from model2.model import StructuralModel
         return StructuralModel(
             dropout=dropout,
             decoder_name=decoder_name,
+            encoder_name=encoder_name,
+            max_branching=max_branching,
         )
     elif model_type == "combined":
         from combined_model.model import CombinedSemanticViT
@@ -67,12 +71,16 @@ def create_model(model_type: str, patch_size: int, bottleneck_dim: int, dropout:
             dropout=dropout,
             decoder_name=decoder_name,
             projector_arch=projector_arch,
+            encoder_name=encoder_name,
+            max_branching=max_branching,
         )
     elif model_type == "tree_text":
         from tree_text_model.model import TreeTextModel
         return TreeTextModel(
             dropout=dropout,
             decoder_name=decoder_name,
+            encoder_name=encoder_name,
+            max_branching=max_branching,
         )
     else:
         raise ValueError(f"Unknown model type: {model_type}. Use 'vit', 'tree', 'combined', or 'tree_text'.")
@@ -109,6 +117,8 @@ def train(
     qwen_lr: float = 1e-5,
     decoder_name: str = "qwen",
     projector_arch: str = "linear",
+    encoder_name: str = "codebert",
+    max_branching: int = 8,
 ):
     """Main training function."""
     print("=" * 60)
@@ -123,6 +133,8 @@ def train(
     print(f"Patch size: {patch_size}")
     print(f"Bottleneck: {bottleneck_dim}")
     print(f"Projector: {projector_arch}")
+    print(f"Code encoder: {encoder_name}")
+    print(f"RvNN max_branching: {max_branching}")
     print(f"Dropout: {dropout}")
     print(f"Gradient accumulation: {gradient_accumulation}")
     print(f"Mixed precision (AMP): {DEVICE == 'cuda'}")
@@ -139,7 +151,9 @@ def train(
     # Load dataset
     print("\n" + "=" * 60)
     print("Loading dataset from Hugging Face...")
-    dataset = MatlabPseudocodeDataset(split=split + "[:80%]", model_type=model_type)
+    # Full train split; evaluation uses the hub's held-out "test" split,
+    # which is never seen in stage 1 or stage 2 training.
+    dataset = MatlabPseudocodeDataset(split=split, model_type=model_type)
     loader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=lambda x: x[0])
 
     if len(dataset) == 0:
@@ -149,7 +163,8 @@ def train(
     # Create model
     print("\n" + "=" * 60)
     print("Creating model...")
-    model = create_model(model_type, patch_size, bottleneck_dim, dropout, decoder_name, projector_arch)
+    model = create_model(model_type, patch_size, bottleneck_dim, dropout, decoder_name,
+                         projector_arch, encoder_name, max_branching)
 
     # Enable LoRA or unfreeze Qwen layers before optimizer construction
     if lora:
@@ -368,6 +383,9 @@ def train(
                         'model_type': model_type,
                         'decoder_name': decoder_name,
                         'projector_arch': projector_arch,
+                        'encoder_name': encoder_name,
+                        'max_branching': max_branching,
+                        'patch_size': patch_size,
                         'model_state': {
                             name: param.data
                             for name, param in model.named_parameters()
@@ -397,6 +415,9 @@ def train(
                 'model_type': model_type,
                 'decoder_name': decoder_name,
                 'projector_arch': projector_arch,
+                'encoder_name': encoder_name,
+                'max_branching': max_branching,
+                'patch_size': patch_size,
                 'model_state': {
                     name: param.data
                     for name, param in model.named_parameters()
@@ -420,7 +441,7 @@ def train(
     print("=" * 60)
 
     model.eval()
-    test_dataset = MatlabPseudocodeDataset(split=split + "[80%:]", model_type=model_type)
+    test_dataset = MatlabPseudocodeDataset(split="test", model_type=model_type)
     smoother = SmoothingFunction().method1
     bleu_scores = []
     efficiency_metrics = []
@@ -533,6 +554,11 @@ def train(
         "epochs": epochs,
         "model_type": model_type,
         "projector_arch": projector_arch,
+        "encoder_name": encoder_name,
+        "max_branching": max_branching,
+        "patch_size": patch_size,
+        "rvnn_truncation": (model.recursive_encoder.truncation_stats()
+                            if hasattr(model, "recursive_encoder") else None),
         "efficiency": efficiency_metrics,
         "avg_proj_var": avg_proj_var,
         "avg_proj_norm": avg_proj_norm,
@@ -542,6 +568,12 @@ def train(
     with open(save_path / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
     print(f"  Saved {save_path / 'metrics.json'}")
+
+    if hasattr(model, "recursive_encoder"):
+        ts = model.recursive_encoder.truncation_stats()
+        print(f"\nRvNN truncation (max_branching={ts['max_branching']}): "
+              f"{ts['truncated_aggregations']}/{ts['total_aggregations']} aggregations "
+              f"({ts['truncation_rate']:.1%}) dropped {ts['dropped_children']} children total")
 
     print("\n" + "=" * 60)
     print("TRAINING COMPLETE")
@@ -571,6 +603,11 @@ if __name__ == "__main__":
     parser.add_argument("--projector", type=str, default="linear",
                         choices=["linear", "mlp"],
                         help="Patch projector: 'linear' baseline or scale-stabilized GELU 'mlp'")
+    parser.add_argument("--code_encoder", type=str, default="codebert",
+                        choices=["codebert", "unixcoder", "codesage"],
+                        help="Frozen code encoder for pixel embeddings")
+    parser.add_argument("--max_branching", type=int, default=8,
+                        help="RvNN max children per node before truncation (tree models)")
     parser.add_argument("--dropout", type=float, default=0.15)
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--eval_every", type=int, default=50)
@@ -632,4 +669,6 @@ if __name__ == "__main__":
         qwen_lr=args.qwen_lr,
         decoder_name=args.decoder,
         projector_arch=args.projector,
+        encoder_name=args.code_encoder,
+        max_branching=args.max_branching,
     )

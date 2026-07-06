@@ -42,11 +42,18 @@ if __name__ == "__main__":
     parser.add_argument("--s2_model", type=str, default="combined",
                         choices=["vit", "tree", "combined", "tree_text"])
     parser.add_argument("--bottleneck", type=int, default=768)
-    parser.add_argument("--patch_size", type=int, default=1)
+    # patch_size default aligned with train_pipeline (was 1 here / 4 there,
+    # which silently changed the experiment depending on entry point)
+    parser.add_argument("--patch_size", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.05)
     parser.add_argument("--projector", type=str, default="linear",
                         choices=["linear", "mlp"],
                         help="Patch projector: 'linear' baseline or scale-stabilized GELU 'mlp'")
+    parser.add_argument("--code_encoder", type=str, default="codebert",
+                        choices=["codebert", "unixcoder", "codesage"],
+                        help="Frozen code encoder for pixel embeddings")
+    parser.add_argument("--max_branching", type=int, default=8,
+                        help="RvNN max children per node before truncation (tree models)")
 
     # Decoder adaptation — choose one: unfreeze (recommended) or LoRA
     parser.add_argument("--unfreeze_layers", type=int, default=18,
@@ -140,6 +147,8 @@ if __name__ == "__main__":
         stage1_checkpoint=s1_best,
         decoder_name=args.decoder,
         projector_arch=args.projector,
+        encoder_name=args.code_encoder,
+        max_branching=args.max_branching,
     )
 
     print("\n" + "#" * 60)

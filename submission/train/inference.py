@@ -50,25 +50,32 @@ def load_model(checkpoint_path: str, lora_rank: int, lora_alpha: int,
     # Auto-detect decoder from checkpoint, with CLI override
     decoder_name = decoder_name or ckpt.get("decoder_name", "qwen")
     projector_arch = ckpt.get("projector_arch", "linear")
-    print(f"Model type: {model_type}, Decoder: {decoder_name}, Projector: {projector_arch}")
+    encoder_name = ckpt.get("encoder_name", "codebert")
+    max_branching = ckpt.get("max_branching", 8)
+    patch_size = ckpt.get("patch_size", patch_size)
+    print(f"Model type: {model_type}, Decoder: {decoder_name}, Projector: {projector_arch}, "
+          f"Encoder: {encoder_name}")
 
     # Build model
     if model_type == "vit":
         from model.model import SemanticViT
         model = SemanticViT(patch_size=patch_size, bottleneck_dim=bottleneck_dim,
                             dropout=dropout, decoder_name=decoder_name,
-                            projector_arch=projector_arch)
+                            projector_arch=projector_arch, encoder_name=encoder_name)
     elif model_type == "tree":
         from model2.model import StructuralModel
-        model = StructuralModel(dropout=dropout, decoder_name=decoder_name)
+        model = StructuralModel(dropout=dropout, decoder_name=decoder_name,
+                                encoder_name=encoder_name, max_branching=max_branching)
     elif model_type == "tree_text":
         from tree_text_model.model import TreeTextModel
-        model = TreeTextModel(dropout=dropout, decoder_name=decoder_name)
+        model = TreeTextModel(dropout=dropout, decoder_name=decoder_name,
+                              encoder_name=encoder_name, max_branching=max_branching)
     else:
         from combined_model.model import CombinedSemanticViT
         model = CombinedSemanticViT(patch_size=patch_size, bottleneck_dim=bottleneck_dim,
                                     dropout=dropout, decoder_name=decoder_name,
-                                    projector_arch=projector_arch)
+                                    projector_arch=projector_arch,
+                                    encoder_name=encoder_name, max_branching=max_branching)
 
     # Restore trainable encoder weights
     if "model_state" in ckpt:

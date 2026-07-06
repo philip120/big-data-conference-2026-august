@@ -4,7 +4,9 @@ accelerate
 sentencepiece
 sly
 datasets
-antlr4-python3-runtime
+antlr4-python3-runtime==4.13.2
 matplotlib
 nltk
 peft
+rouge-score
+google-genai
