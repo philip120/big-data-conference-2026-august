@@ -3,6 +3,7 @@ import re
 import shutil
 import time
 import random
+import hashlib
 import subprocess
 import tempfile
 from pathlib import Path
@@ -28,6 +29,7 @@ MIN_LINES = 5
 MAX_LINES = 100
 MAX_CHAR_LENGTH = 4000
 SKIP_SOURCE_ITEMS = 0
+VERBOSE_SKIPS = False  # print why statically-rejected items were dropped
 
 # Prompt: ask Gemini to write a self-contained test harness for a function
 TEST_HARNESS_PROMPT = """\
@@ -162,6 +164,142 @@ def parse_function_info(code: str) -> tuple[str, int, int] | None:
     return None
 
 
+_MATLAB_KEYWORDS = {
+    "if", "elseif", "else", "end", "for", "while", "do", "until", "switch", "case",
+    "otherwise", "function", "return", "break", "continue", "try", "catch",
+    "global", "persistent", "unwind_protect", "unwind_protect_cleanup", "endfunction",
+    "endif", "endfor", "endwhile", "endswitch", "end_try_catch",
+}
+
+_resolve_cache: dict[str, bool] = {}
+
+
+def _strip_strings(code: str) -> str:
+    """Blank out string literals so their contents aren't mistaken for code.
+
+    A bare ' is ambiguous in MATLAB: transpose after a value (a', x(1)'), quote
+    otherwise. Without this, text like fprintf('%s failed (line %d)') reads as a
+    call to `failed`.
+    """
+    out = []
+    i, n = 0, len(code)
+    while i < n:
+        c = code[i]
+        if c == "'":
+            prev = next((ch for ch in reversed(out) if not ch.isspace()), "")
+            if prev and (prev.isalnum() or prev in "_)]}.'"):
+                out.append(c)  # transpose
+                i += 1
+                continue
+            i += 1  # opening quote
+            while i < n:
+                if code[i] == "'":
+                    if i + 1 < n and code[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                if code[i] == "\n":
+                    break
+                i += 1
+            out.append("''")
+        elif c == '"':
+            i += 1
+            while i < n:
+                if code[i] == '"':
+                    if i + 1 < n and code[i + 1] == '"':
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                if code[i] == "\n":
+                    break
+                i += 1
+            out.append('""')
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _extract_callees(code: str) -> set[str]:
+    """Names used in call position that aren't local variables or locally-defined functions."""
+    code = _strip_strings(code)
+    local_funcs = set(re.findall(r"^[ \t]*function\b[^\n]*?(\w+)\s*\(", code, re.MULTILINE))
+    assigned: set[str] = set()
+
+    # Walk statement-by-statement. Splitting on ; and newline keeps a match from
+    # running past its own statement (\s* spans newlines, which silently ate
+    # assignments that followed a bare `else`/`end` line).
+    for stmt in re.split(r"[;\n]", code):
+        m = re.match(
+            r"[ \t]*([a-zA-Z]\w*)[ \t]*"      # target name
+            r"(?:\([^)]*\)|\{[^}]*\})?"        # optional indexing:  x(i) / x{i}
+            r"(?:[ \t]*\.[ \t]*\w+(?:\([^)]*\))?)*"  # optional field path: s.a.b(i)
+            r"[ \t]*=(?!=)",                   # assignment, not ==
+            stmt,
+        )
+        if m:
+            assigned.add(m.group(1))
+        m_multi = re.match(r"[ \t]*\[([^\]]*)\][ \t]*=(?!=)", stmt)
+        if m_multi:
+            assigned.update(re.findall(r"[a-zA-Z]\w*", m_multi.group(1)))
+
+    # Function signatures: both output vars and input params are local names.
+    # function [a, b] = name(x, y)  |  function a = name(x)  |  function name(x)
+    for sig in re.findall(r"^[ \t]*function\b([^\n]*)", code, re.MULTILINE):
+        m_out = re.match(r"\s*(?:\[([^\]]*)\]|(\w+))\s*=", sig)
+        if m_out:
+            # `function [] = f(x)` matches with an empty group(1), leaving group(2) None
+            assigned.update(re.findall(r"[a-zA-Z]\w*", m_out.group(1) or m_out.group(2) or ""))
+        m_in = re.search(r"\(([^)]*)\)", sig)
+        if m_in:
+            assigned.update(re.findall(r"[a-zA-Z]\w*", m_in.group(1)))
+
+    for it in re.findall(r"^[ \t]*for[ \t]*\(?[ \t]*(\w+)[ \t]*=", code, re.MULTILINE):
+        assigned.add(it)
+
+    # Anonymous-function params and global/persistent declarations
+    for decl in re.findall(r"^[ \t]*(?:global|persistent)[ \t]+([^\n;%]*)", code, re.MULTILINE):
+        assigned.update(re.findall(r"[a-zA-Z]\w*", decl))
+    for params in re.findall(r"@\s*\(([^)]*)\)", code):
+        assigned.update(re.findall(r"[a-zA-Z]\w*", params))
+
+    # Names in call position. The lookbehind drops struct field access —
+    # in `K.s(1:n)` or `dense.A(:,1)` the field is indexed data, not a function.
+    called = set(re.findall(r"(?<![.\w])([a-zA-Z]\w*)\s*\(", code))
+
+    # Anything used as a struct field anywhere is a field name, not a function.
+    fields = set(re.findall(r"\.\s*([a-zA-Z]\w*)", code))
+
+    return called - _MATLAB_KEYWORDS - local_funcs - assigned - fields
+
+
+def _resolve_in_octave(names: set[str]) -> dict[str, bool]:
+    """Ask Octave which names exist (builtin/package/file). Cached across calls."""
+    unknown = sorted(n for n in names if n not in _resolve_cache)
+    if unknown:
+        probe = "\n".join(f"printf('%s %d\\n', '{n}', exist('{n}'));" for n in unknown)
+        out, _ = run_octave_script(probe)
+        found = {}
+        for line in out.split("\n"):
+            parts = line.strip().split()
+            if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                found[parts[0]] = int(parts[1]) > 0
+        for n in unknown:
+            _resolve_cache[n] = found.get(n, False)
+    return {n: _resolve_cache[n] for n in names}
+
+
+def missing_callees(code: str) -> set[str]:
+    """Functions the code calls that Octave cannot resolve — i.e. repo-local helpers."""
+    candidates = _extract_callees(code)
+    if not candidates:
+        return set()
+    resolved = _resolve_in_octave(candidates)
+    return {n for n, ok in resolved.items() if not ok}
+
+
 def has_likely_output(code: str) -> bool:
     print_calls = re.search(r"\b(disp|fprintf|printf|display)\s*\(", code)
     unsuppressed = any(
@@ -198,8 +336,8 @@ def run_octave_script(code: str) -> tuple[str, bool]:
             pass
 
 
-def run_with_harness(func_code: str, func_name: str, harness_body: str) -> tuple[str, bool]:
-    """Write func_name.m + harness to isolated tmpdir, run harness."""
+def run_with_harness(func_code: str, func_name: str, harness_body: str) -> tuple[str, bool, str]:
+    """Write func_name.m + harness to isolated tmpdir, run harness. Returns (stdout, ok, stderr)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         (Path(tmpdir) / f"{func_name}.m").write_text(func_code)
         wrapper = f"addpath('{tmpdir}');\n{harness_body}"
@@ -210,11 +348,24 @@ def run_with_harness(func_code: str, func_name: str, harness_body: str) -> tuple
                 ["octave", "--no-gui", "--quiet", str(wrapper_file)],
                 capture_output=True, text=True, timeout=OCTAVE_TIMEOUT,
             )
-            return result.stdout.strip(), result.returncode == 0
+            return result.stdout.strip(), result.returncode == 0, result.stderr.strip()
         except subprocess.TimeoutExpired:
-            return "", False
+            return "", False, "timeout"
         except FileNotFoundError:
             raise RuntimeError("Octave not found. Install with: brew install octave")
+
+
+def first_error_line(stderr: str) -> str:
+    """Pull the most informative line out of an Octave stderr blob."""
+    for line in stderr.split("\n"):
+        line = line.strip()
+        if line.startswith("error:"):
+            return line[:160]
+    for line in stderr.split("\n"):
+        line = line.strip()
+        if line and not line.startswith("warning:"):
+            return line[:160]
+    return stderr.replace("\n", " ")[:160]
 
 
 def normalize_output(text: str) -> str:
@@ -257,9 +408,13 @@ def call_gemini(prompt: str, retries: int = 5) -> str:
     return ""
 
 
+def code_hash(code: str) -> str:
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
 def save_pair(
     index: int, code: str, pseudocode: str, regen_code: str, kind: str,
-    orig_out: str, regen_out: str, harness: str = "",
+    orig_out: str, regen_out: str, harness: str = "", source_index: int = -1,
 ):
     sample_dir = OUT_DIR / f"sample_{index}"
     sample_dir.mkdir(exist_ok=True)
@@ -269,8 +424,33 @@ def save_pair(
     (sample_dir / "kind.txt").write_text(kind, encoding="utf-8")
     (sample_dir / "orig_output.txt").write_text(orig_out, encoding="utf-8")
     (sample_dir / "regen_output.txt").write_text(regen_out, encoding="utf-8")
+    (sample_dir / "source_index.txt").write_text(str(source_index), encoding="utf-8")
     if harness:
         (sample_dir / "harness.m").write_text(harness, encoding="utf-8")
+
+
+def scan_existing() -> tuple[int, int, set[str]]:
+    """Return (next_sample_index, resume_source_index, hashes of already-saved code)."""
+    next_index = 0
+    resume_source = 0
+    hashes = set()
+    for d in OUT_DIR.iterdir():
+        if not (d.is_dir() and d.name.startswith("sample_")):
+            continue
+        try:
+            next_index = max(next_index, int(d.name.split("_", 1)[1]) + 1)
+        except ValueError:
+            pass
+        code_file = d / "code.m"
+        if code_file.exists():
+            hashes.add(code_hash(code_file.read_text(encoding="utf-8")))
+        src_file = d / "source_index.txt"
+        if src_file.exists():
+            try:
+                resume_source = max(resume_source, int(src_file.read_text()) + 1)
+            except ValueError:
+                pass
+    return next_index, resume_source, hashes
 
 
 def save_audit_sample(n: int):
@@ -301,12 +481,17 @@ def main():
     print(f"Loading dataset stream: {HF_DATASET}...")
     dataset = load_dataset(HF_DATASET, split="train", streaming=True)
 
-    existing = [d for d in OUT_DIR.iterdir() if d.is_dir() and d.name.startswith("sample_")]
-    count = len(existing)
-    if count:
-        print(f"Resuming from {count} existing samples")
+    count, resume_source, done_hashes = scan_existing()
+    skip_until = max(SKIP_SOURCE_ITEMS, resume_source)
+    if done_hashes:
+        print(f"Resuming: {len(done_hashes)} existing samples, next name sample_{count}, "
+              f"skipping source items < {skip_until}")
+        if resume_source == 0:
+            print("  (no source_index.txt found — falling back to content-hash dedup)")
 
     stats = dict(
+        already_done=0,
+        missing_helpers=0,
         quality=0,
         external_deps=0,
         no_output_heuristic=0,
@@ -322,9 +507,9 @@ def main():
     total_seen = 0
 
     for i, sample in enumerate(dataset):
-        if i < SKIP_SOURCE_ITEMS:
+        if i < skip_until:
             if i % 500 == 0:
-                print(f"Skipping source item {i}...", end="\r")
+                print(f"Skipping source item {i}/{skip_until}...", end="\r")
             continue
 
         if count >= MAX_SAMPLES:
@@ -339,12 +524,25 @@ def main():
 
         clean_code = clean_matlab_code(raw_code)
 
+        if code_hash(clean_code) in done_hashes:
+            stats["already_done"] += 1
+            continue
+
         if not is_high_quality(clean_code):
             stats["quality"] += 1
             continue
 
         if has_external_deps(clean_code):
             stats["external_deps"] += 1
+            continue
+
+        # Static check: code calling repo-local helpers can never run standalone.
+        # Done before any Gemini call so doomed items cost nothing.
+        missing = missing_callees(clean_code)
+        if missing:
+            stats["missing_helpers"] += 1
+            if VERBOSE_SKIPS:
+                print(f"  Skip (item {i}): unresolvable calls -> {sorted(missing)[:4]}")
             continue
 
         func_info = parse_function_info(clean_code)
@@ -389,7 +587,8 @@ def main():
                 print(f"    regen: {regen_out[:100]!r}")
                 continue
 
-            save_pair(count, clean_code, pseudocode, regen_code, "script", orig_out, regen_out)
+            save_pair(count, clean_code, pseudocode, regen_code, "script", orig_out, regen_out,
+                      source_index=i)
             stats["accepted_script"] += 1
 
         # ---- Function path ----
@@ -413,10 +612,12 @@ def main():
                 continue
             harness_body = extract_matlab_code(harness_raw)
 
-            orig_out, orig_ok = run_with_harness(clean_code, func_name, harness_body)
+            orig_out, orig_ok, orig_err = run_with_harness(clean_code, func_name, harness_body)
             if not orig_ok or not orig_out:
                 stats["harness_fail"] += 1
                 print(f"  Skip: harness did not produce output (ok={orig_ok})")
+                if orig_err:
+                    print(f"    octave: {first_error_line(orig_err)}")
                 continue
 
             pseudocode = call_gemini(PSEUDOCODE_PROMPT.replace("<<<MATLAB_CODE>>>", clean_code))
@@ -437,10 +638,12 @@ def main():
             regen_func_name = regen_info[0] if regen_info else func_name
             adapted_harness = harness_body.replace(func_name, regen_func_name) if regen_func_name != func_name else harness_body
 
-            regen_out, regen_ok = run_with_harness(regen_code, regen_func_name, adapted_harness)
+            regen_out, regen_ok, regen_err = run_with_harness(regen_code, regen_func_name, adapted_harness)
             if not regen_ok or not regen_out:
                 stats["regen_run_fail"] += 1
                 print(f"  Skip: regenerated function failed to run (ok={regen_ok})")
+                if regen_err:
+                    print(f"    octave: {first_error_line(regen_err)}")
                 continue
 
             if not outputs_match(orig_out, regen_out):
@@ -450,10 +653,12 @@ def main():
                 print(f"    regen: {regen_out[:100]!r}")
                 continue
 
-            save_pair(count, clean_code, pseudocode, regen_code, "function", orig_out, regen_out, harness_body)
+            save_pair(count, clean_code, pseudocode, regen_code, "function", orig_out, regen_out,
+                      harness_body, source_index=i)
             stats["accepted_function"] += 1
 
         print(f"  VALID -> saved sample_{count}")
+        done_hashes.add(code_hash(clean_code))
         count += 1
         time.sleep(0.3)
 
@@ -463,6 +668,8 @@ def main():
     print(f"Accepted (functions)    : {stats['accepted_function']}")
     print(f"Accepted (total)        : {count}")
     print(f"---")
+    print(f"Skipped already done    : {stats['already_done']}")
+    print(f"Dropped missing helpers : {stats['missing_helpers']}")
     print(f"Dropped quality         : {stats['quality']}")
     print(f"Dropped external deps   : {stats['external_deps']}")
     print(f"Dropped no-output hint  : {stats['no_output_heuristic']}")
