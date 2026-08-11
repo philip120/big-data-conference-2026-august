@@ -1,0 +1,16 @@
+{
+  "already_done": 2784,
+  "quality": 24183,
+  "external_deps": 12971,
+  "missing_helpers": 18174,
+  "no_output_heuristic": 5,
+  "no_output_func": 3,
+  "script_dynamic": 735,
+  "func_dynamic": 3509,
+  "accepted": 5296,
+  "accepted_static_mismatch": 0,
+  "empty": 2,
+  "total_seen": 67662,
+  "dynamic_candidates": 9540,
+  "dynamic_dropped": 4244
+}
