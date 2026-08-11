@@ -9,6 +9,7 @@
 \usepackage{xcolor}
 \usepackage{listings}
 \usepackage{booktabs}
+\lstset{basicstyle=\ttfamily\footnotesize, breaklines=true, columns=flexible}
 
 % ------------------------------------------------------------------
 % NOTE ON BIBLIOGRAPHY: this file keeps the \cite keys of the ECML
@@ -68,7 +69,7 @@ Round-trip validation has a failure mode that, to our knowledge, prior work does
 
 We choose MATLAB as the target language deliberately. It is widely used in control engineering, signal processing, and scientific computing, yet under-represented in LLM pretraining corpora \cite{qwen3technicalreport}, so it is a setting where curated supervision matters most; at the same time the pipeline itself is language-agnostic---it needs only a parser and an interpreter---and MATLAB's interpreter (Octave) is free and scriptable, which makes execution-based acceptance practical at corpus scale.
 
-The second half of the paper uses the dataset for a controlled study of a design assumption common to structure-aware code models: that a compressed continuous representation of a program---an AST summary vector, patch-aggregated encoder embeddings---can stand in for the program's token sequence as conditioning for a language-model decoder. We compare a fine-tuned text-only decoder against three variants that replace the code text with soft prefixes: a single RvNN-encoded AST vector, ViT-style patches over CodeBERT embeddings, and the two combined. The outcome is unambiguous and negative: the text-only decoder reaches 0.416 ROUGE-L while all three prefix variants collapse to 0.16--0.18, and inspection shows they emit a generic template largely independent of the input program. Rather than reporting the numbers and stopping, we diagnose the collapse (Section~\ref{sec:diagnosis}): the deepest cause is a \emph{capacity asymmetry}---2.2B decoder parameters were trainable against a prefix of at most six vectors on 4{,}764 training samples, so memorizing the unconditional distribution of MATLAB pseudocode lowered the loss more cheaply than learning to decode opaque vectors---compounded by the narrow prefix, an instruction that points at code which is not there, and targets that never teach the model to stop.
+The second half of the paper uses the dataset for a controlled study of a design assumption common to structure-aware code models: that a compressed continuous representation of a program---an AST summary vector, patch-aggregated encoder embeddings---can stand in for the program's token sequence as conditioning for a language-model decoder. We compare a fine-tuned text-only decoder against three variants that replace the code text with soft prefixes: a single RvNN-encoded AST vector, ViT-style patches over CodeBERT embeddings, and the two combined. The outcome is unambiguous and negative: the text-only decoder reaches 0.416 ROUGE-L while all three prefix variants collapse to 0.17--0.18, and inspection shows they emit a generic template largely independent of the input program. Rather than reporting the numbers and stopping, we diagnose the collapse (Section~\ref{sec:diagnosis}): the deepest cause is a \emph{capacity asymmetry}---2.2B decoder parameters were trainable against a prefix of at most six vectors on 4{,}764 training samples, so memorizing the unconditional distribution of MATLAB pseudocode lowered the loss more cheaply than learning to decode opaque vectors---compounded by the narrow prefix, an instruction that points at code which is not there, and targets that never teach the model to stop.
 
 The contributions of this paper are:
 \begin{itemize}
@@ -314,7 +315,11 @@ R = [1 0 0; 0 ct -st; 0 st ct];
 
 \textbf{C1 --- The prefix is too narrow to compete.} One to six vectors carry the entire program, after CodeBERT has already collapsed each statement to a single CLS vector and patching has grouped statements four at a time. Even a decoder trying to use the prefix has ${\sim}5$ tokens of signal against 12 tokens of fixed prompt. For the prefix to beat memorization it would have to be informative enough to lower per-token loss more than 2.2B parameters of distribution-fitting; at this bandwidth it cannot be.
 
-\textbf{C2 --- The instruction points at nothing.} The decoder input reads $[\text{soft tokens}][\text{``Convert the following MATLAB code\ldots''}][\text{target}]$: the model is told to convert code that \emph{follows}, and nothing follows. The instruction, kept verbatim from the text variant, references an object absent from the sequence, further rewarding the unconditional prior.
+\textbf{C2 --- The instruction points at nothing.} The decoder input reads
+\begin{center}
+$[\text{soft tokens}]\,[\text{``Convert the following MATLAB code\ldots''}]\,[\text{target}]$:
+\end{center}
+the model is told to convert code that \emph{follows}, and nothing follows. The instruction, kept verbatim from the text variant, references an object absent from the sequence, further rewarding the unconditional prior.
 
 \textbf{C3 --- No end-of-sequence supervision.} Targets are tokenized without an EOS token and truncated at 512 tokens against ${\sim}305$-word references, so the model is never trained to stop: 100\% of encoder-variant generations (96\% of Text-only) ran to the decode cap. Fig.~\ref{fig:length-curve} quantifies the cost: score as a function of kept length peaks at 160--240 words for every variant---\emph{before} the cap each hit---against mean generation lengths of 282--328 words. Every model overshoots its own optimum, so raising the cap would lower scores, not raise them; the missing stop token costs accuracy, not budget. This bug affects all four variants equally and therefore cannot explain the baseline--encoder gap; we report it because it caps the baseline's ceiling and because it is cheap to fix.
 
