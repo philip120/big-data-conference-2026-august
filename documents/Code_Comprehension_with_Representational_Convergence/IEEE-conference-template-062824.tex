@@ -18,7 +18,7 @@
 % frozen-LM references). The template thebibliography was removed.
 % ------------------------------------------------------------------
 
-% ---- Dataset funnel numbers (single source of truth for the text) ----
+% ---- Dataset numbers (single source of truth for the text) ----
 \newcommand{\FunnelTotal}{67{,}662}        % source items consumed
 \newcommand{\NAccepted}{5{,}296}           % validated pairs
 \newcommand{\NTrain}{4{,}764}
@@ -30,8 +30,8 @@
 \begin{document}
 
 \title{Execution-Validated Pseudocode for MATLAB:\\
-Dataset Construction and a Diagnosis of\\
-Soft-Prefix Collapse in Code Comprehension}
+A Dataset, and Why Compressed Code Prefixes\\
+Fail to Condition a Language Model}
 
 \author{
 \IEEEauthorblockN{1\textsuperscript{st} Given Name Surname}
@@ -50,7 +50,7 @@ email address or ORCID}
 \maketitle
 
 \begin{abstract}
-Large-scale code-comprehension corpora annotate source code with natural-language descriptions written by a language model, but such annotations are only trusted, not verified: a description can be fluent and still misstate what the program computes. We present a MATLAB$\to$pseudocode dataset in which every annotation carries an \emph{executable proof of faithfulness}. A description is accepted only if a second, independent model---given the description alone---can regenerate code whose output, under execution in Octave on identical inputs, matches the output of the original program. A static resolvability check closes the soundness hole that otherwise corrupts such round-trip validation: functions that call repository-local helpers absent from the corpus are rejected before execution, so no annotation is validated against a fabricated or unexercised dependency. From \FunnelTotal{} corpus functions the pipeline retains \NAccepted{} validated pairs, a stronger acceptance criterion than the $n$-gram similarity or LLM-judge screening used by existing pseudocode corpora. We then use the dataset for a controlled study of a widely assumed design: conditioning a language-model decoder on compressed soft prefixes---a recursive neural network (RvNN) vector over the abstract syntax tree, Vision-Transformer-style patches over CodeBERT embeddings, and their combination---in place of the code's token sequence. The result is strongly negative. A fine-tuned text-only decoder reaches 0.416 ROUGE-L, while all three prefix-conditioned variants collapse to 0.17--0.18, generating a generic template largely independent of the input: they name the function they describe in 0\% of samples (text-only: 80\%), and up to 29\% of their outputs share an identical eight-word opening. We trace the collapse to a capacity asymmetry---2.2B decoder parameters were trainable against a prefix of at most six vectors, making memorization of the unconditional pseudocode distribution cheaper than learning to read the prefix---compounded by prefix bandwidth, an instruction that references absent code, and missing end-of-sequence supervision. The dataset, pipeline, and diagnosis together offer both a verified resource and a cautionary result for structure-injection designs.
+Teaching a language model to explain code requires thousands of code--description pairs, and at that scale the descriptions are written by another language model. This raises a question that existing corpora leave open: can those descriptions be trusted? A description can read well and still be wrong about what the code does. We answer the question with execution. In our pipeline, a description of a MATLAB function enters the dataset only if a second model---which never sees the original code---can rebuild working code from the description alone, and that rebuilt code produces the same outputs as the original when both run in Octave on the same inputs. If the description was incomplete or wrong, the rebuilt program behaves differently and the pair is rejected. One static check keeps this test honest: functions that call helpers missing from the corpus are rejected up front, because they cannot run as written and would pass the test only by accident. From \FunnelTotal{} corpus functions, \NAccepted{} validated pairs survive. We then used the dataset to test an idea we ourselves believed in: that a compressed vector representation of a program---a syntax-tree summary vector, ViT-style patch embeddings, or both---could replace the code text as input to a decoder. It cannot. A fine-tuned text-only decoder reaches 0.416 ROUGE-L; all three vector variants collapse to 0.17--0.18 and write nearly the same description for every input. Tracing the failure leads to a simple cause: 2.2B decoder parameters were trainable while the code arrived as at most six vectors, so memorizing typical pseudocode was easier than learning to read the vectors. We release the dataset, the pipeline, and the analysis.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -61,125 +61,143 @@ Dataset Construction, Execution-Based Validation, Large Language Model, Code Com
 \section{Introduction}
 \label{sec:intro}
 
-Understanding source code is a central activity in software engineering: developers spend much of their effort reading unfamiliar systems, tracing legacy behaviour, debugging, and documenting before they change anything \cite{4815280,10.1147/sj.282.0294,Fjeldstad1979,ko2007information}. Large Language Models (LLMs) have become the dominant tool for automating parts of this work, producing summaries, explanations, and pseudocode from raw source \cite{yuan2023evaluatinginstructiontunedlargelanguage}. Progress on the task, however, is gated by a data problem that is easy to state and hard to solve: \emph{supervised comprehension corpora need natural-language descriptions of code, descriptions at scale are written by LLMs, and LLM-written descriptions are unverified}. A generated description can be grammatical, plausible, and wrong---omitting a branch, inventing a step, or misreading an operator---and a model trained on such targets learns to reproduce plausible unfaithfulness. Existing corpora screen their annotations by $n$-gram similarity to references or by asking another LLM to judge quality; both measure surface agreement, not behaviour.
+Developers spend most of their time reading code, not writing it. They study unfamiliar systems, trace legacy behaviour, debug, and document before they change anything \cite{4815280,10.1147/sj.282.0294,Fjeldstad1979,ko2007information}. Large Language Models (LLMs) now automate parts of this reading: they summarize, explain, and translate code into plain language \cite{yuan2023evaluatinginstructiontunedlargelanguage}. We set out to build such a model for MATLAB---a language that is everywhere in control engineering and scientific computing, yet rare in LLM training data \cite{qwen3technicalreport}.
 
-This paper makes the acceptance criterion behavioural. We construct a MATLAB$\to$pseudocode dataset in which a description is admitted only if it passes a \emph{round-trip execution test}: a second, independent model, given the description and nothing else, must write code whose output under execution matches the output of the original program on identical inputs. Faithfulness of text is thereby reduced to behavioural equivalence of two programs, which can be checked automatically in GNU Octave. Every one of the \NAccepted{} retained pairs carries a concrete artefact of this proof---the original code, the description, the regenerated code, the harness, and both matching outputs.
+That goal immediately created a data problem. Training needs thousands of MATLAB functions, each paired with a description of what it does. No one hand-writes thousands of descriptions, so we did what the field does: we had an LLM write them. But this only moves the problem. A generated description can be fluent and still wrong---it can skip a branch, invent a step, or misread an operator. Train on wrong descriptions, and the model learns to produce wrong descriptions. Existing corpora face the same issue and screen their annotations by word overlap with references, or by asking another LLM to judge them. Both check how a description \emph{reads}. Neither checks whether it is \emph{true}.
 
-Round-trip validation has a failure mode that, to our knowledge, prior work does not address, and closing it is a key contribution of the pipeline. Real-world corpora store one function per file, so a function that calls a \emph{repository-local helper}---defined elsewhere in its original project---can never run standalone. When such a function enters a naive round-trip validator, the validation does not fail cleanly; it passes for the wrong reason: either the harness generator silently invents the missing helper, or the chosen inputs never reach the call site, so a ``passing'' execution validates code that does not run as written. We remove these cases \emph{before} any execution or LLM call with a static resolvability check that queries the runtime for every name used in call position. Section~\ref{sec:dataset} quantifies how many candidates this single check removes.
+So we asked: how do you verify a description without reading it? The answer we arrived at is the core of this paper. \emph{If a description really captures what a program does, then someone given only the description should be able to rebuild a program that behaves the same way.} That sentence turns directly into a test (Fig.~\ref{fig:pipeline-desc}). One model describes the code. A second model, which never sees the original, writes new code from the description alone. Both programs run in GNU Octave on the same inputs. If the outputs match, the description passed; if not, it is rejected. Every one of the \NAccepted{} pairs in our dataset carries the full evidence of its own test: original code, description, rebuilt code, test inputs, and both matching outputs.
 
-We choose MATLAB as the target language deliberately. It is widely used in control engineering, signal processing, and scientific computing, yet under-represented in LLM pretraining corpora \cite{qwen3technicalreport}, so it is a setting where curated supervision matters most; at the same time the pipeline itself is language-agnostic---it needs only a parser and an interpreter---and MATLAB's interpreter (Octave) is free and scriptable, which makes execution-based acceptance practical at corpus scale.
+Building this pipeline taught us that the test itself has a trap. Our corpus stores one function per file, and many functions call helpers that live elsewhere in their original project. Such a function cannot run as written---but it can still \emph{pass} the test, for the wrong reason. The model that generates test inputs may quietly invent the missing helper, or the inputs may never reach the line that calls it. Either way the test says ``pass'' and proves nothing. The fix is to ask before running: a static check extracts every name the code calls and asks Octave whether each one exists. Any function with an unresolvable call is rejected before a single LLM call is spent on it. This one check removes 26.9\% of the corpus---and every removed item would otherwise have entered the test with a meaningless result (Section~\ref{sec:dataset}).
 
-The second half of the paper uses the dataset for a controlled study of a design assumption common to structure-aware code models: that a compressed continuous representation of a program---an AST summary vector, patch-aggregated encoder embeddings---can stand in for the program's token sequence as conditioning for a language-model decoder. We compare a fine-tuned text-only decoder against three variants that replace the code text with soft prefixes: a single RvNN-encoded AST vector, ViT-style patches over CodeBERT embeddings, and the two combined. The outcome is unambiguous and negative: the text-only decoder reaches 0.416 ROUGE-L while all three prefix variants collapse to 0.17--0.18, and inspection shows they emit a generic template largely independent of the input program. Rather than reporting the numbers and stopping, we diagnose the collapse (Section~\ref{sec:diagnosis}): the deepest cause is a \emph{capacity asymmetry}---2.2B decoder parameters were trainable against a prefix of at most six vectors on 4{,}764 training samples, so memorizing the unconditional distribution of MATLAB pseudocode lowered the loss more cheaply than learning to decode opaque vectors---compounded by the narrow prefix, an instruction that points at code which is not there, and targets that never teach the model to stop.
+With the dataset in hand, we turned to the question that motivated us in the first place. Code is a tree: functions contain branches, branches contain loops, loops contain statements. A tokenizer flattens all of it into a string of subwords. We believed that handing the decoder the tree explicitly---as compact learned vectors---would help it understand the code, and might even replace the text entirely. So we trained four variants on the validated data: a plain fine-tuned text decoder, and three variants that swap the code text for compressed vectors (one syntax-tree summary vector, ViT-style patch embeddings, or both).
 
-The contributions of this paper are:
+The result went against our expectation, and the second half of this paper is the story of finding out why. The text decoder reached 0.416 ROUGE-L. All three vector variants collapsed to 0.17--0.18. Looking at their actual outputs revealed something stranger than low scores: the vector models write nearly the same description no matter which program they see. They never name the function they describe; the text model names it 80\% of the time. Following that clue led to a simple root cause: our stage-2 training left 2.2B decoder parameters trainable while the program arrived as at most six vectors. The model had two ways to reduce its loss---learn to decode six opaque vectors, or memorize what MATLAB pseudocode typically says---and it took the cheaper one. Section~\ref{sec:diagnosis} walks through the evidence and the three further design flaws that compounded the shortcut.
+
+Our contributions are:
 \begin{itemize}
-    \item \textbf{An execution-validated MATLAB$\to$pseudocode dataset} of \NAccepted{} pairs, in which every annotation is accepted only when an independent model can reconstruct behaviourally equivalent code from it, together with the full validation artefacts per sample. The dataset and pipeline are public.\footnote{\texttt{https://huggingface.co/datasets/philip120/sc-matlab-validated}}
-    \item \textbf{A validation pipeline with a soundness guarantee}: a static resolvability check that prevents non-self-contained functions from producing hollow validations, plus a quantified acceptance funnel showing where candidates are lost.
-    \item \textbf{A controlled negative result with a causal diagnosis}: three compressed soft-prefix conditioning schemes all collapse to input-independent template generation on this task, and we identify the training-capacity asymmetry, prefix bandwidth, instruction grounding, and end-of-sequence supervision failures that jointly produce the collapse---each verifiable from our released evaluation outputs.
+    \item \textbf{A dataset.} \NAccepted{} MATLAB-to-pseudocode pairs, each validated by rebuilding and re-running the code, with all artefacts included. Dataset and pipeline are public.\footnote{\texttt{https://huggingface.co/datasets/philip120/sc-matlab-validated}}
+    \item \textbf{A validation pipeline that guards itself.} The self-containedness check stops broken functions from passing the test by accident, and we report exactly where all \FunnelTotal{} candidates went.
+    \item \textbf{A negative result, explained.} Three compressed-prefix designs collapse into input-independent output. We trace the causes and give three cheap probes that expose this failure in any similar system.
 \end{itemize}
 
-We frame the study around three questions:
+The paper follows three questions in order:
 \begin{description}
-    \item[\textbf{RQ1.}] \textit{Can round-trip execution equivalence validate LLM-generated pseudocode at corpus scale, and what does its acceptance funnel look like?}
-    \item[\textbf{RQ2.}] \textit{How well does straightforward decoder fine-tuning perform on execution-validated MATLAB$\to$pseudocode data?}
-    \item[\textbf{RQ3.}] \textit{Do compressed structural or patch-based soft prefixes carry enough signal to replace the code's token sequence as decoder conditioning?}
+    \item[\textbf{RQ1.}] \textit{Can round-trip execution validate LLM-written pseudocode at corpus scale, and what does it filter out?}
+    \item[\textbf{RQ2.}] \textit{How well does plain decoder fine-tuning perform on the validated data?}
+    \item[\textbf{RQ3.}] \textit{Can a handful of learned vectors replace the code text as decoder input?}
 \end{description}
 
 % ==================================================================
 \section{Related Work}
 \label{sec:related}
 
-\textbf{Code comprehension and summarization.} Code comprehension research spans static analysis, AST-based techniques, statistical models, and, recently, LLMs \cite{husak2025combiningstaticanalysistechniques,SIRBU2025125821,sun2023abstractsyntaxtreeprogramming,4815280}. Evaluation practice ranges from task time and comprehension-question accuracy to automatic overlap metrics \cite{2411.14491,feitelson2021considerations,boehm1978quantitative}. Our task formulation---pseudocode generation as a measurable proxy for comprehension---follows this line, but our focus is on the trustworthiness of the supervision itself.
+\textbf{Code comprehension.} Research on understanding code spans static analysis, AST-based methods, statistical models, and LLMs \cite{husak2025combiningstaticanalysistechniques,SIRBU2025125821,sun2023abstractsyntaxtreeprogramming,4815280}. Comprehension is measured in many ways, from task time to overlap metrics \cite{2411.14491,feitelson2021considerations,boehm1978quantitative}. Like much recent work, we use pseudocode generation as a measurable proxy for comprehension. Our focus, however, is one step earlier: whether the training data itself can be trusted.
 
-\textbf{Validation of generated annotations.} Large code--text corpora pair code with docstrings or LLM-generated descriptions, screened (if at all) by heuristic filters, $n$-gram similarity, or LLM-as-judge scoring \cite{yuan2023evaluatinginstructiontunedlargelanguage}. Execution-based signals have been used to validate \emph{generated code} against tests \cite{chen2018execution,shojaee2023execution}; we invert the direction and use execution to validate \emph{generated text}: the description is the artefact under test, and regenerated code is the measurement instrument. To our knowledge, no existing pseudocode corpus admits annotations by behavioural round-trip, nor guards that round-trip against unresolvable dependencies.
+\textbf{Validating generated annotations.} Existing code--text corpora screen their annotations with heuristic filters, word-overlap scores, or LLM judges \cite{yuan2023evaluatinginstructiontunedlargelanguage}. Execution has been used before---but to check generated \emph{code} against tests \cite{chen2018execution,shojaee2023execution}. We flip the direction and use execution to check generated \emph{text}: the description is the thing under test, and rebuilt code is the measuring instrument. We know of no pseudocode corpus that accepts annotations this way, or that guards the test against unresolvable dependencies.
 
-\textbf{Structure-aware code models.} A substantial literature injects ASTs into neural code models \cite{10.1007/s10664-023-10378-9,shi-etal-2021-cast,10.5555/3304222.3304348,10.5555/3524938.3524962,10.1109/ICSE43902.2021.00026}, and pre-trained encoders such as CodeBERT and CodeT5 \cite{wang-etal-2021-codet5} supply node- or token-level representations. Patch-style aggregation of embeddings follows the Vision Transformer recipe; its application to code generation is comparatively unexplored \cite{soselia2023learning}. Our study is a controlled stress test of the compressed end of this design space.
+\textbf{Structure-aware code models.} Many models inject syntax trees into neural networks for code \cite{10.1007/s10664-023-10378-9,shi-etal-2021-cast,10.5555/3304222.3304348,10.5555/3524938.3524962,10.1109/ICSE43902.2021.00026}, often on top of pre-trained encoders such as CodeBERT or CodeT5 \cite{wang-etal-2021-codet5}. Patch-style aggregation of embeddings copies the Vision Transformer recipe; for code it is largely untested \cite{soselia2023learning}. Our study stress-tests the most compressed corner of this design space---and documents how it fails.
 
-\textbf{Soft-prefix conditioning and frozen decoders.} Prefix and prompt tuning condition a language model through learned continuous vectors \cite{li2021prefix,lester2021power}. Multimodal systems that bridge a frozen LLM through a learned projector---Frozen \cite{tsimpoukelli2021frozen}, BLIP-2's Q-Former \cite{li2023blip2}---freeze the decoder precisely so that the training signal is forced through the projected prefix. Our negative result is an empirical demonstration of what happens when that discipline is dropped: with the decoder unfrozen, the model satisfies the objective by memorizing the target distribution and ignoring the prefix entirely. We return to this connection in Section~\ref{sec:diagnosis}.
+\textbf{Soft prefixes and frozen decoders.} Prefix tuning and prompt tuning steer a language model with learned vectors \cite{li2021prefix,lester2021power}. Multimodal systems such as Frozen \cite{tsimpoukelli2021frozen} and BLIP-2 \cite{li2023blip2} connect an encoder to a \emph{frozen} LLM through a trained projector. They freeze the decoder on purpose: it forces the training signal through the projector. Our negative result is a demonstration of what happens when that rule is broken.
 
 % ==================================================================
-\section{Execution-Validated Dataset Construction}
+\section{The Dataset}
 \label{sec:dataset}
 
-\subsection{The Validation Problem}
-Our supervision signal is a step-by-step natural-language description of what each MATLAB function does, generated by an LLM (\texttt{gemini-flash-lite}, temperature 0.2). The generation prompt requires the description to be precise enough that ``someone could reimplement the code from the pseudocode alone and get identical outputs,'' to preserve all computed values, loop bounds, conditions, and output statements, and to avoid MATLAB syntax. This is scalable but not trustworthy on its face. We therefore accept a description into the dataset only if it passes an execution-based faithfulness test, so that data quality is decided by behaviour rather than fluency.
+\subsection{The Problem: Descriptions We Could Not Trust}
+Each MATLAB function needs a step-by-step English description. Ours are written by an LLM (\texttt{gemini-flash-lite}, temperature 0.2). The prompt asks for a description precise enough that ``someone could reimplement the code from the pseudocode alone and get identical outputs''---every computed value, every loop bound, every printed message. This gives us descriptions at scale, but no reason to believe any single one of them. So the rest of this section is about earning that belief.
 
-\subsection{Round-Trip Execution Equivalence}
-The test is a round trip (Fig.~\ref{fig:pipeline-desc}). Given source code $C$, we generate a description $S$; we then hand $S$ to a second generation call that never sees $C$ and ask it to write code $C'$ in the same language purely from the description. If $S$ faithfully captures the behaviour of $C$, then $C'$ should behave like $C$. We check this by execution: both $C$ and $C'$ run under GNU Octave on identical inputs, and $S$ is accepted only when their outputs agree.
-
-Because a bare function produces no observable output, each function is executed inside a generated test harness: a minimal Octave script that seeds the random state (\texttt{rng(42)}), constructs small numeric inputs, calls the function, and displays every return value. The harness prompt explicitly forbids defining, implementing, or stubbing any helper function---it may only construct inputs and make the call---which is what gives the static check of Section~\ref{sec:resolvability} its teeth. The same harness (with the function name adapted if the regeneration renamed it) runs both $C$ and $C'$, so the two programs are observed under identical inputs. Outputs are normalized before comparison---whitespace canonicalized, floating-point values with five or more decimals rounded to four---so trivial formatting differences do not cause spurious rejections.
+\subsection{The Idea: If It Is True, You Can Rebuild From It}
+The description's own quality bar suggests its own test. If a description really is precise enough to reimplement the code, then \emph{let a model try exactly that}---and check the result by running it.
 
 \begin{figure}[t]
 \centering
 \fbox{\parbox{0.96\linewidth}{\small
 \textbf{Round-trip acceptance test} \\[2pt]
-1.\ $C \xrightarrow{\ \text{LLM}\ } S$ \hfill (describe) \\
-2.\ $S \xrightarrow{\ \text{independent LLM, never sees } C\ } C'$ \hfill (reimplement) \\
-3.\ run $C$ and $C'$ in Octave under one generated harness \\
-4.\ accept $S$ iff $\mathrm{normalize}(\mathrm{out}(C)) = \mathrm{normalize}(\mathrm{out}(C'))$
+1.\ Describe: code $C \rightarrow$ description $S$. \\
+2.\ Rebuild: $S \rightarrow$ code $C'$, by a model that never sees $C$. \\
+3.\ Run $C$ and $C'$ in Octave on the same inputs. \\
+4.\ Keep the pair only if the normalized outputs match.
 }}
-\caption{The acceptance criterion reduces faithfulness of a natural-language description to behavioural equivalence of two programs.}
+\caption{A description is accepted only if it is complete enough to rebuild a program with the same behaviour.}
 \label{fig:pipeline-desc}
 \end{figure}
 
-\subsection{The Soundness Hole and the Static Resolvability Check}
+Given code $C$, we generate a description $S$. A second, independent generation call receives only $S$ and writes code $C'$. If $S$ is faithful, $C'$ should behave like $C$. We check behaviour by execution: both programs run in Octave, and $S$ is accepted only when their outputs agree.
+
+Two practical questions follow, each with a simple answer. \emph{What inputs do the programs run on?} A bare function produces no output, so each function runs inside a small generated test script (a \emph{harness}) that fixes the random seed, builds small numeric inputs, calls the function, and prints every return value. The same harness runs both $C$ and $C'$, so both see identical inputs. The harness prompt has one hard rule---it may only build inputs and make the call, never define or stub a helper---and the next subsection explains why that rule matters. \emph{When do outputs ``agree''?} After normalization: whitespace is cleaned and long floating-point values are rounded to four decimals, so formatting noise cannot cause false rejections.
+
+\subsection{The Trap: Tests That Pass for the Wrong Reason}
 \label{sec:resolvability}
-Round-trip execution has one failure mode that would quietly corrupt the dataset. The source corpus stores one function per file, so any function that calls a repository-local helper---a routine defined elsewhere in its original project---cannot run standalone. Such a function does not fail the validator cleanly; it can \emph{pass for the wrong reason}. Either the harness generator, asked to produce inputs, silently invents the missing helper, so the function is validated against a fabricated dependency; or the chosen inputs never reach the branch containing the call, so the missing routine is never exercised and the ``passing'' run validates nothing. In both cases execution succeeds while the central claim---that the retained code provably runs as written---is hollow.
+While building the pipeline we found a failure mode that would have quietly poisoned the dataset. The corpus stores one function per file. A function that calls a helper from its original project cannot run alone---and yet it can still pass the round trip:
+\begin{itemize}
+  \item the harness generator, asked for inputs, may silently write the missing helper itself, so the function is tested against invented code; or
+  \item the generated inputs may never reach the branch that calls the helper, so the missing code is never exercised at all.
+\end{itemize}
+In both cases the test says ``pass'' while proving nothing. Left open, this loophole would have filled the dataset with pairs whose validation was hollow---and nothing downstream would ever have noticed.
 
-We close the hole statically, before any execution or LLM call. From each candidate we extract every identifier used in call position, after blanking string literals (a bare \texttt{'} in MATLAB is ambiguous between transpose and quote, and unstripped string contents otherwise masquerade as calls). We then exclude language keywords, locally defined subfunctions, assigned variables, function parameters and outputs, loop iterators, \texttt{global}/\texttt{persistent} declarations, anonymous-function parameters, and struct-field accesses. Every surviving name is submitted to the runtime itself---Octave's \texttt{exist}---and the candidate is rejected if any name fails to resolve to a builtin, an installed package, or a defined function. Resolution results are cached across candidates, so the check costs a few interpreter calls over the whole corpus. This one check removes 18{,}174 items---26.9\% of the entire corpus, more than three candidates for every pair ultimately accepted---each of which had already passed the quality and dependency filters and would otherwise have entered the round-trip with hollow validation (Table~\ref{tab:funnel}).
+The fix is to ask before running. From each candidate we extract every name used as a function call, dropping names that are clearly not calls: keywords, local functions, assigned variables, parameters, loop variables, and struct fields. (String literals are blanked first; in MATLAB a bare \texttt{'} can mean quote or transpose, and unstripped strings look like calls.) Every remaining name goes to Octave's \texttt{exist}: does it resolve to a builtin, a package, or a defined function? One unresolvable name rejects the candidate---before any execution or LLM call is spent on it. Results are cached, so the whole corpus costs only a few interpreter calls.
 
-\subsection{Acceptance Funnel}
+The scale of the catch surprised us: 18{,}174 items---26.9\% of the whole corpus, more than three rejected for every pair we finally accept. Every one of them had already passed the earlier filters and would otherwise have entered the round trip with a meaningless result (Table~\ref{tab:funnel}).
+
+\subsection{The Funnel: Where 67,662 Functions Went}
 \label{sec:funnel}
-The full pipeline, in order: (1)~strip comments; (2)~quality bounds (5--100 lines, $\le$4{,}000 characters, $\ge$50\% unique lines); (3)~reject external I/O, GUI, and toolbox dependencies by pattern (\texttt{fopen}, \texttt{imread}, \texttt{plot}, \texttt{system}, \texttt{eval}, toolbox namespaces, \dots); (4)~the static resolvability check; (5)~reject functions with no returnable or printed output; (6)~content-hash deduplication; (7)~the round-trip execution test of Fig.~\ref{fig:pipeline-desc}. Table~\ref{tab:funnel} reports the funnel over the \FunnelTotal{} source items consumed. Static stages were re-executed deterministically over the same corpus range to obtain exact per-stage counts; the LLM/execution stages are reported as their aggregate, since replaying them would require re-querying the annotation model.
+The full pipeline, in order:
+(1) strip comments;
+(2) quality bounds: 5--100 lines, at most 4{,}000 characters, at least 50\% unique lines;
+(3) reject file I/O, GUI, and toolbox calls by pattern (\texttt{fopen}, \texttt{imread}, \texttt{plot}, \texttt{system}, \texttt{eval}, \dots);
+(4) the self-containedness check;
+(5) reject functions with nothing to print or return;
+(6) drop duplicates by content hash;
+(7) the round-trip test.
+Table~\ref{tab:funnel} shows where the \FunnelTotal{} source items went. We re-ran the static stages (1--6) deterministically over the same corpus range to get exact counts per stage; the LLM and execution stages appear as one aggregate row, since replaying them would need new LLM calls.
 
 \begin{table}[t]
 \centering
-\caption{Acceptance funnel over \FunnelTotal{} source-corpus items. Stages apply in order; each row counts items dropped at that stage.}
+\caption{Acceptance funnel over \FunnelTotal{} source items. Stages apply in order; each row counts items dropped at that stage.}
 \label{tab:funnel}
 \begin{tabular}{lrr}
 \toprule
 Stage & Dropped & \% of total \\
 \midrule
 Empty after comment stripping        & 2       & 0.0 \\
-Duplicate of an accepted item (hash) & 2{,}784  & 4.1 \\
+Duplicate of an accepted item        & 2{,}784  & 4.1 \\
 Quality bounds                       & 24{,}183 & 35.7 \\
-External I/O / GUI / toolbox         & 12{,}971 & 19.2 \\
-\textbf{Unresolvable callee (static)}& \textbf{18{,}174} & \textbf{26.9} \\
+File I/O / GUI / toolbox             & 12{,}971 & 19.2 \\
+\textbf{Self-containedness check}    & \textbf{18{,}174} & \textbf{26.9} \\
 No observable output                 & 8       & 0.0 \\
-Round-trip stage (harness, generation, & & \\
-\quad execution, or output mismatch) & 4{,}244  & 6.3 \\
+Round-trip test failed               & 4{,}244  & 6.3 \\
 \midrule
 \textbf{Accepted}                    & \textbf{\NAccepted} & \textbf{7.8} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Two readings of the funnel are worth making explicit. First, the static stages do the heavy lifting: of the 9{,}540 items that reach the round trip, 55.5\% pass it---the expensive LLM-and-execution stage runs only on candidates that can actually run. Second, the round trip is still discriminative, rejecting 4{,}244 candidates whose descriptions failed to reconstruct behaviour; these are precisely the unfaithful annotations that similarity screening would have admitted. Notably, all 735 flat scripts that reached the round trip failed it (typically at original-execution time), so the released dataset consists entirely of functions.
+Read the funnel from top to bottom and the design logic appears. The cheap static stages run first and do most of the work: only 9{,}540 items reach the expensive round trip, and 55.5\% of those pass. The round trip still earns its keep at the end: it rejects 4{,}244 descriptions that could not rebuild the program's behaviour---exactly the bad annotations that overlap-based screening would have let through. One detail: all 735 flat scripts that reached the round trip failed it, so the released dataset contains only functions.
 
-Because execution equivalence is checked on one generated input set, it has limited input coverage: it is a \emph{screen}, not a proof of equivalence on all inputs. Its value is that it removes the large majority of unfaithful annotations automatically and cheaply, leaving a small residue for manual review; a random audit sample of 50 accepted pairs is retained with all artefacts for inspection.
+A note on what the test does and does not prove. Each pair runs on one set of inputs. Matching outputs on one input set is strong evidence of faithfulness, not a proof of equivalence on all inputs. The round trip is a high-precision filter, not a theorem. A random sample of 50 accepted pairs is kept, with all artefacts, for manual audit.
 
-\subsection{Dataset Characterization}
+\subsection{What Is in the Dataset}
 \label{sec:characterization}
-The released dataset contains \NAccepted{} validated pairs, all MATLAB functions (no flat script survived the full funnel), drawn from the MNBVC MATLAB corpus.\footnote{\texttt{semran1/yulan-code-MNBVC-matlab} on HuggingFace.} Source functions average 24.7 lines (median 18, range 5--100 by construction); descriptions average 314.6 words (median 272, range 47--1{,}052). Each sample ships with seven artefacts: the cleaned source, the description, the regenerated code, the test harness, both execution outputs, and the source-corpus index. The train/test split is 90/10 (\NTrain{}/\NTest{}) and deterministic by content hash, so samples never migrate between splits across releases and the test split was never seen by any training stage in Section~\ref{sec:models}.
+The result is \NAccepted{} validated pairs, all MATLAB functions, drawn from the MNBVC MATLAB corpus.\footnote{\texttt{semran1/yulan-code-MNBVC-matlab} on HuggingFace.} Functions average 24.7 lines (median 18, range 5--100). Descriptions average 314.6 words (median 272, range 47--1{,}052). Each sample has seven files: the cleaned source, the description, the rebuilt code, the harness, both outputs, and the source-corpus index. The train/test split is 90/10 (\NTrain{}/\NTest{}), assigned by content hash, so a sample never switches sides between releases.
 
-Compared with corpora validated by similarity to human references or by LLM judgement, the acceptance criterion here is strictly harder to satisfy: an annotation must contain enough information to \emph{reconstruct the program's behaviour}, not merely to resemble a reference. The cost is yield---7.8\% of source items survive---and a bias toward self-contained numeric code, which we discuss in Section~\ref{sec:threats}.
+Compared to overlap- or judge-based screening, our criterion is strictly harder: a description must contain enough information to rebuild the program's behaviour, not just to resemble a reference. The price is yield---7.8\%---and a bias toward small, self-contained, numeric code (Section~\ref{sec:threats}).
 
 % ==================================================================
-\section{Case Study: Conditioning a Decoder on Compressed Code Representations}
+\section{Case Study: Can a Few Vectors Replace the Code?}
 \label{sec:models}
 
-We now use the dataset to test whether compressed continuous representations of a program can replace its token sequence as decoder conditioning. We frame comprehension as translation $f_{\theta}: C \rightarrow S$ from MATLAB source $C$ to pseudocode $S$, generated autoregressively:
+With trustworthy data in hand, we returned to the idea that started the project. Code is a tree, and a tokenizer flattens it. Could we hand the decoder the tree directly---and could a compact structural representation even \emph{replace} the code text? The task is translation $f_{\theta}: C \rightarrow S$ from code to pseudocode, generated token by token:
 \begin{equation}
   P(s_1, \ldots, s_T) = \prod_{t=1}^{T} P(s_t \mid \mathbf{z},\, s_{<t}),
 \end{equation}
-where $\mathbf{z}$ is the conditioning representation of $C$. Four variants differ only in $\mathbf{z}$; the decoder is Qwen3-4B-Instruct \cite{qwen3technicalreport} (36 layers, hidden size 2560) in every case.
+where $\mathbf{z}$ is the representation of the code. Four variants differ only in $\mathbf{z}$; the decoder is always Qwen3-4B-Instruct \cite{qwen3technicalreport} (36 layers, hidden size 2560).
 
-\subsection{Shared Encoder Machinery}
-For the three encoder variants, an ANTLR4-generated MATLAB parser converts the source into an AST, from which we extract semantic nodes---function declarations, conditions, loops, assignments---each recording its nesting depth (Table~\ref{tab:nodes}). Each node's text is encoded by frozen CodeBERT into a 768-dimensional CLS vector; these node vectors are the ``pixels'' every encoder variant consumes. A learned projector bridges CodeBERT's space to the decoder's: $f_{\text{proj}}: \mathbb{R}^{768} \rightarrow \mathbb{R}^{2560}$.
+\subsection{From Tree to Vector, One Forced Step at a Time}
+Handing the decoder the tree dictates a chain of steps, each answering the question the previous one raises. To use the hierarchy we must first \emph{recover} it: an ANTLR4 parser turns the source into an abstract syntax tree (AST), from which we extract semantic nodes---function declarations, conditions, loops, assignments---each with its nesting depth (Table~\ref{tab:nodes}). The nodes are still raw text, so each must be \emph{given a meaning}: frozen CodeBERT encodes every node into a 768-dimensional vector. The decoder cannot read CodeBERT's space, so a trained projector \emph{bridges} the two: $f_{\text{proj}}: \mathbb{R}^{768} \rightarrow \mathbb{R}^{2560}$. What remains is deciding how many of these vectors reach the decoder---and that choice defines the variants.
 
 \begin{table}[t]
   \centering
-  \caption{Semantic nodes extracted for a small example function.}
+  \caption{Semantic nodes for a small example function.}
   \label{tab:nodes}
   \begin{tabular}{c l l}
     \toprule
@@ -194,27 +212,27 @@ For the three encoder variants, an ANTLR4-generated MATLAB parser converts the s
 \end{table}
 
 \subsection{The Four Variants}
-\textbf{Text-only (baseline).} The decoder receives the raw code through its own BPE tokenizer (up to 512 tokens), followed by the instruction prompt; no encoder is involved. This is ordinary sequence-to-sequence fine-tuning.
+\textbf{Text-only (baseline).} The decoder reads the raw code through its own tokenizer (up to 512 tokens), then the instruction prompt. Plain fine-tuning; no encoder. This is what the vector variants must beat.
 
-\textbf{Tree.} A recursive neural network (RvNN) folds the AST bottom-up---children are aggregated into their parent with shared weights, nodes wider than 8 children truncated---until the root yields a single vector $\mathbf{z}_{\text{tree}} \in \mathbb{R}^{2560}$ summarizing the program. The decoder input is $[\mathbf{z}_{\text{tree}}; \text{prompt}]$: \emph{one} soft token in place of the code.
+\textbf{Tree.} The decoder cannot consume a whole tree, so a recursive neural network (RvNN) folds it: children merge into their parent, level by level, until the root yields one vector $\mathbf{z}_{\text{tree}} \in \mathbb{R}^{2560}$ that summarizes the entire program. The decoder input is that single vector, then the prompt.
 
-\textbf{ViT.} Following the Vision Transformer recipe, node vectors are grouped into patches of $p{=}4$ consecutive nodes, each flattened patch linearly projected to $\mathbb{R}^{2560}$, giving $\lceil N/p \rceil$ soft tokens ($\approx$5 on average) in place of the code.
+\textbf{ViT.} Borrowing the Vision Transformer recipe from computer vision, node vectors are grouped four at a time into ``patches,'' each projected to one decoder vector. A typical function becomes about 5 vectors.
 
-\textbf{Combined.} The tree vector is prepended to the patch sequence: $[\mathbf{z}_{\text{tree}}; \mathbf{p}_1, \ldots, \mathbf{p}_M; \text{prompt}]$.
+\textbf{Combined.} The tree vector, then the patches, then the prompt---structure and sequence together.
 
-Note what the three encoder variants share: the code's token sequence is \emph{absent}. The decoder sees only projected vectors and a 12-token instruction. Total prefix width is 1 vector (Tree), $\approx$5 (ViT), or $\approx$6 (Combined)---a design that compounds CodeBERT's collapse of each statement to one CLS vector with a further $4\times$ patch grouping. This compression is the hypothesis under test, not an accident: RQ3 asks precisely whether so compact a representation can carry the program.
+Note what the three vector variants share: \emph{the code text is gone}. The decoder sees only projected vectors and a 12-token instruction. The whole program arrives as 1 vector (Tree), about 5 (ViT), or about 6 (Combined). This extreme compression is the hypothesis under test (RQ3), not an accident.
 
 \subsection{Training}
 \label{sec:training}
-Training is two-stage. \textbf{Stage 1} fine-tunes the decoder on raw code$\to$pseudocode text pairs (5 epochs, lr $2{\times}10^{-4}$, the last 18 of 36 transformer layers plus final norm and \texttt{lm\_head} unfrozen); it is both the Text-only baseline and the initialization for stage 2. \textbf{Stage 2} trains each encoder variant's projector (lr $3{\times}10^{-4}$, 10 epochs) with the same 18 decoder layers unfrozen at a low learning rate ($1{\times}10^{-5}$); CodeBERT is frozen throughout. The objective in both stages is cross-entropy over target tokens only. All models train on the \NTrain{}-sample train split.
+Training has two stages. \textbf{Stage 1} fine-tunes the decoder on plain code-to-pseudocode pairs (5 epochs, lr $2{\times}10^{-4}$; the last 18 of 36 layers, the final norm, and the output head unfrozen). Stage 1 is both the Text-only baseline and the starting point for stage 2. \textbf{Stage 2} trains each vector variant's projector (lr $3{\times}10^{-4}$, 10 epochs), with the same 18 decoder layers unfrozen at a small learning rate ($1{\times}10^{-5}$). CodeBERT stays frozen. Both stages minimize cross-entropy on the target tokens. All models train on the \NTrain{} training pairs.
 
-Two facts about this configuration, unremarkable at training time, turn out to matter greatly for the outcome and are flagged here for later reference. First, unfreezing 18 decoder layers plus the head makes \textbf{2{,}205{,}713{,}408 parameters trainable in stage 2}, against a conditioning prefix of at most six vectors. Second, the tokenized targets carry \textbf{no end-of-sequence token}, and are truncated at 512 tokens while references average ${\sim}305$ words. Section~\ref{sec:diagnosis} shows both choices' consequences.
+Two details of this setup looked harmless at training time and turn out to drive the whole result. First: with 18 layers plus the head unfrozen, \textbf{2{,}205{,}713{,}408 parameters are trainable in stage 2}---against a code representation of at most six vectors. Second: the training targets carry \textbf{no end-of-sequence token} and are cut at 512 tokens, so the model is never shown where a description should stop. Keep both in mind for Section~\ref{sec:diagnosis}.
 
 % ==================================================================
 \section{Experimental Setup}
 \label{sec:setup}
 
-Evaluation uses the held-out \NTest{}-sample test split, unseen by every training stage. Generation is greedy with a 512-token cap. We report ROUGE-1/2/L, BLEU, and chrF, plus efficiency metrics (prefix width, KV-cache size, peak VRAM, latency) measured during the same runs. Owing to interrupted evaluation runs, the variants cover different subsets of the test split (Tree and ViT: all \NTest{}; Combined: 180; Text-only: 100); all cross-variant comparisons in Table~\ref{tab:results} are therefore computed on the 100 items common to all four, and we verified that each variant's full-subset mean differs from its common-100 mean by at most 0.006 ROUGE-L. Significance is assessed with a paired bootstrap (10{,}000 resamples) over the common items.
+We evaluate on the held-out \NTest{}-sample test split, which no training stage ever saw. Generation is greedy, capped at 512 tokens. We report ROUGE-1/2/L, BLEU, and chrF, plus efficiency numbers measured in the same runs. Because some evaluation runs were interrupted, the variants cover different amounts of the test split (Tree and ViT: all \NTest{}; Combined: 180; Text-only: 100). All comparisons in Table~\ref{tab:results} therefore use the 100 items covered by all four variants. Where a variant has a larger evaluation set, its full-set mean differs from its common-100 mean by at most 0.006 ROUGE-L. Significance uses a paired bootstrap with 10{,}000 resamples.
 
 % ==================================================================
 \section{Results}
@@ -222,7 +240,7 @@ Evaluation uses the held-out \NTest{}-sample test split, unseen by every trainin
 
 \begin{table}[t]
 \centering
-\caption{Quality on the 100 test items common to all variants. All encoder-variant deficits vs.\ Text-only are significant at $p < 10^{-4}$ (paired bootstrap). Full-subset ROUGE-L, where larger evaluation sets exist: Tree 0.173 ($n{=}532$), ViT 0.176 ($n{=}532$), Combined 0.182 ($n{=}180$).}
+\caption{Quality on the 100 test items shared by all variants. Every vector-variant deficit vs.\ Text-only is significant at $p < 10^{-4}$. On the larger evaluation sets: Tree 0.173 ROUGE-L ($n{=}532$), ViT 0.176 ($n{=}532$), Combined 0.182 ($n{=}180$).}
 \label{tab:results}
 \begin{tabular}{lccccc}
 \toprule
@@ -236,40 +254,42 @@ Tree      & 0.263 & 0.064 & 0.173 & 0.033 & 0.248 \\
 \end{tabular}
 \end{table}
 
-\textbf{RQ2: text fine-tuning works.} The Text-only decoder reaches 0.416 ROUGE-L / 0.570 ROUGE-1 (Table~\ref{tab:results}, Fig.~\ref{fig:quality}). MATLAB's English-based naming and the precision of the validated targets let a straightforwardly fine-tuned decoder produce largely faithful step-by-step descriptions.
+We expected the structural variants to help. They did not---and the way they failed is the finding.
 
-\textbf{RQ3: every compressed-prefix variant collapses.} All three encoder variants land in a narrow band at 0.17--0.18 ROUGE-L---less than half the baseline---and the ordering among them (Combined $>$ ViT $>$ Tree) spans only ${\sim}0.009$ ROUGE-L with overlapping confidence intervals, so we draw no conclusion about their relative merits; in particular we do \emph{not} claim that fusing the two encoders helps. The interesting question is why all three fail identically, which Section~\ref{sec:diagnosis} answers: they are not weak describers of the input but describers of \emph{no input at all}.
+\textbf{RQ2: plain fine-tuning works well.} The Text-only decoder reaches 0.416 ROUGE-L and 0.570 ROUGE-1 (Table~\ref{tab:results}, Fig.~\ref{fig:quality}). MATLAB code is full of English words---function and variable names---and the validated targets are precise, so a fine-tuned decoder produces largely faithful step-by-step descriptions.
 
-\textbf{Efficiency.} The prefix compression works exactly as designed---13--18 input vectors versus 242 text tokens (Fig.~\ref{fig:efficiency})---and KV-cache footprints are correspondingly smaller (46 vs.\ 66\,MB). The numbers are reported for completeness, but we attach no value claim to them: compression that discards the signal is not efficiency \cite{soselia2023learning}. Peak VRAM (7.7--8.7\,GB) is dominated by the decoder in all variants; generation speed is ${\sim}19$ tokens/s throughout, and every encoder variant generated up to the 512-token cap on 100\% of samples (Text-only: 96\%)---a symptom analysed below.
+\textbf{RQ3: every vector variant collapses.} All three land in a narrow band, 0.17--0.18 ROUGE-L---less than half the baseline. The differences among the three are tiny (about 0.009) with overlapping confidence intervals, so we do not rank them, and we do not claim that combining the two encoders helps. The real question is why all three fail in the same way---and the answer, in Section~\ref{sec:diagnosis}, is that they are not describing the input badly. They are not describing the input at all.
+
+\textbf{Efficiency.} The compression works exactly as designed: 13--18 input vectors instead of 242 text tokens (Fig.~\ref{fig:efficiency}), and a smaller KV cache (46 vs.\ 66\,MB). We attach no value to this: compression that loses the signal is not efficiency. Peak VRAM (7.7--8.7\,GB) is dominated by the decoder everywhere; generation speed is about 19 tokens/s for all variants. One number, though, is a clue to what follows: every vector variant hit the 512-token generation cap on 100\% of samples (Text-only: 96\%).
 
 \begin{figure}[t]
       \centering
       \includegraphics[width=1.0\linewidth]{figures/plot_quality_bars.pdf}
-      \caption{Generation quality by variant (test split; bars carry SEM). The text-conditioned baseline more than doubles every metric relative to the three soft-prefix variants.}
+      \caption{Quality by variant (bars show SEM). The text baseline more than doubles every metric relative to the three vector variants.}
       \label{fig:quality}
 \end{figure}
 \begin{figure}[t]
       \centering
       \includegraphics[width=1.0\linewidth]{figures/plot_efficiency.pdf}
-      \caption{Efficiency by variant: mean decoder input width, KV-cache size, peak VRAM. The prefix variants achieve the intended ${\sim}13\times$ input compression---while losing the input.}
+      \caption{Efficiency by variant: input width, KV cache, peak VRAM. The vector variants compress the input about $13\times$---and lose it.}
       \label{fig:efficiency}
 \end{figure}
 
 % ==================================================================
-\section{Diagnosis: Anatomy of a Prefix Collapse}
+\section{Why the Vector Variants Fail}
 \label{sec:diagnosis}
 
-Low overlap scores alone would be compatible with several stories---noisy but input-specific descriptions, systematic verbosity, style mismatch. The stored generations rule those out and identify template collapse.
+Low scores alone could mean many things: noisy descriptions, wrong style, too much text. So we read the generations. What we found was stranger than low quality: the three vector models produce almost the same output no matter which program they are shown. We call this \emph{template collapse}, and this section traces it to its causes.
 
-\subsection{The Generations Are Input-Independent}
-Three measurements, each computable from the released evaluation outputs:
+\subsection{First, Establish the Symptom}
+Three measurements, all computable from the released evaluation files:
 \begin{itemize}
-    \item \textbf{Function naming.} The Text-only model names the function it is describing in 80\% of common-item samples. All three encoder variants name it in \textbf{0\%}. They do produce function names---confidently, and wrongly: generic hallucinations such as \texttt{get\_size}, \texttt{getdata}, \texttt{sqr}.
-    \item \textbf{Shared openings.} 29\% of Tree generations begin with the \emph{identical} eight words (``1.\ Define a function named \texttt{get\_size} that takes''); ViT and Combined show the same degeneracy at 19\% and 9\%. The Text-only model's most common opening appears once.
-    \item \textbf{Reference mismatch costs them almost nothing.} Re-scoring encoder-variant generations against randomly mismatched references barely lowers their scores: most of the 0.17 they earn is what any fluent, MATLAB-flavoured, numbered step list earns against this reference distribution.
+    \item \textbf{They never name the function.} The Text-only model names the function it is describing in 80\% of samples. All three vector variants: 0\%. They do output function names---wrong ones, like \texttt{get\_size} or \texttt{getdata}.
+    \item \textbf{They repeat themselves.} 29\% of Tree outputs start with the \emph{same eight words} (``1.\ Define a function named \texttt{get\_size} that takes''). ViT: 19\%. Combined: 9\%. The Text-only model's most common opening appears once.
+    \item \textbf{Wrong references barely hurt them.} Scoring the vector models against randomly shuffled references costs them almost nothing. Most of their 0.17 is what \emph{any} fluent, numbered, MATLAB-flavoured step list scores against these references.
 \end{itemize}
 
-Table~\ref{tab:qualitative} shows the failure concretely: for a rotation-matrix constructor, Text-only describes the actual program, while the three prefix variants fluently describe three different programs that do not exist.
+Table~\ref{tab:qualitative} shows what this looks like on one input. The function builds a rotation matrix. Text-only describes it correctly. The three vector variants confidently describe three different programs that do not exist.
 
 \begin{lstlisting}[language=Matlab]
 function R = rotx(t, deg)
@@ -289,7 +309,7 @@ R = [1 0 0; 0 ct -st; 0 st ct];
 
 \begin{table}[t]
     \centering
-    \caption{Model outputs for the \texttt{rotx} function above (openings shown). The three prefix variants describe hallucinated programs.}
+    \caption{Output openings for the \texttt{rotx} function above. The three vector variants describe programs that do not exist.}
     \label{tab:qualitative}
     \begin{tabular}{p{1.3cm} c p{0.62\linewidth}}
         \toprule
@@ -309,58 +329,58 @@ R = [1 0 0; 0 ct -st; 0 st ct];
     \end{tabular}
 \end{table}
 
-\subsection{Four Causes}
+\subsection{Then, Trace the Causes}
 \label{sec:causes}
-\textbf{C0 --- Capacity asymmetry: the decoder was not frozen.} Stage-2 training unfroze the last 18 decoder layers plus final norm and head: 2{,}205{,}713{,}408 trainable parameters, against a conditioning prefix of at most six vectors, on \NTrain{} samples. Under cross-entropy, two strategies lower the loss: learn to decode six opaque projected vectors, or use two billion parameters to memorize the unconditional distribution of MATLAB pseudocode---every sequence starts ``1.\ Define a function named\ldots'', argument checks follow, loops after that. The second is far cheaper, and it is what training found; the measured degeneracies above are exactly its signature. Systems that successfully condition frozen LLMs through learned projectors---Frozen \cite{tsimpoukelli2021frozen}, BLIP-2 \cite{li2023blip2}, prefix tuning \cite{li2021prefix}---keep the decoder frozen precisely to deny the model this shortcut. This is the deepest cause; the remaining three compound it.
+Why would a trained model ignore its own input? Working backwards from the symptom, we found four reasons, one deep and three that compound it.
 
-\textbf{C1 --- The prefix is too narrow to compete.} One to six vectors carry the entire program, after CodeBERT has already collapsed each statement to a single CLS vector and patching has grouped statements four at a time. Even a decoder trying to use the prefix has ${\sim}5$ tokens of signal against 12 tokens of fixed prompt. For the prefix to beat memorization it would have to be informative enough to lower per-token loss more than 2.2B parameters of distribution-fitting; at this bandwidth it cannot be.
+\textbf{C0 --- The decoder was not frozen.} Recall the two details flagged in Section~\ref{sec:training}. Stage 2 left 18 decoder layers plus the output head trainable: 2{,}205{,}713{,}408 parameters, on \NTrain{} samples, with the code arriving as at most six vectors. Under cross-entropy, the model had two ways to lower its loss. It could learn to decode six opaque projected vectors---hard. Or it could use two billion parameters to memorize what MATLAB pseudocode typically says---every description starts ``1.\ Define a function named\ldots'', argument checks come next, loops after that---easy. It chose easy. The degeneracies measured above are exactly the fingerprint of a memorized template. This is why systems like Frozen \cite{tsimpoukelli2021frozen}, BLIP-2 \cite{li2023blip2}, and prefix tuning \cite{li2021prefix} freeze the decoder: freezing removes the shortcut. Ours was open, and the model took it.
 
-\textbf{C2 --- The instruction points at nothing.} The decoder input reads
-\begin{center}
-$[\text{soft tokens}]\,[\text{``Convert the following MATLAB code\ldots''}]\,[\text{target}]$:
-\end{center}
-the model is told to convert code that \emph{follows}, and nothing follows. The instruction, kept verbatim from the text variant, references an object absent from the sequence, further rewarding the unconditional prior.
+\textbf{C1 --- The prefix is too narrow to fight back.} For the prefix to beat memorization, it would need to carry enough information to lower the loss more than memorizing does. One to six vectors cannot. CodeBERT already crushes each statement into one vector; patching then merges four statements into one. Even a decoder that wanted to use the prefix gets about 5 vectors of signal next to 12 tokens of fixed prompt.
 
-\textbf{C3 --- No end-of-sequence supervision.} Targets are tokenized without an EOS token and truncated at 512 tokens against ${\sim}305$-word references, so the model is never trained to stop: 100\% of encoder-variant generations (96\% of Text-only) ran to the decode cap. Fig.~\ref{fig:length-curve} quantifies the cost: score as a function of kept length peaks at 160--240 words for every variant---\emph{before} the cap each hit---against mean generation lengths of 282--328 words. Every model overshoots its own optimum, so raising the cap would lower scores, not raise them; the missing stop token costs accuracy, not budget. This bug affects all four variants equally and therefore cannot explain the baseline--encoder gap; we report it because it caps the baseline's ceiling and because it is cheap to fix.
+\textbf{C2 --- The instruction points at nothing.} The decoder input is: soft vectors, then the prompt ``Convert the following MATLAB code\ldots'', then the target. The prompt was kept unchanged from the text variant, so it promises code that follows---and nothing follows. One more reason to ignore the input.
+
+\textbf{C3 --- The model is never taught to stop.} The targets have no end-of-sequence token and are cut at 512 tokens, while references average about 305 words. So generation runs to the cap almost always---the clue we flagged in the efficiency results. Fig.~\ref{fig:length-curve} shows the cost: each model's score peaks at 160--240 words, then declines as it keeps talking, with actual generations averaging 282--328 words. Raising the cap would \emph{lower} scores. This bug hits all four variants equally, so it cannot explain the gap between them; we report it because it lowers every score and is cheap to fix.
 
 \begin{figure}[t]
       \centering
       \includegraphics[width=1.0\linewidth]{figures/plot_length_curve.pdf}
-      \caption{ROUGE-L as a function of how much of each generation is kept. No end-of-sequence token is appended to training targets, so decoding runs to the token cap on 100\% of encoder-variant samples (96\% for Text-only) and every model overshoots its own optimum: the enlarged marker is each model's peak, reached at 160--240 words against mean generation lengths of 282--328 words.}
+      \caption{ROUGE-L when each generation is cut to its first $k$ words. Every model peaks at 160--240 words but generates 282--328 on average, because no end-of-sequence token was in the training targets. The enlarged marker is each model's peak.}
       \label{fig:length-curve}
 \end{figure}
 
-\subsection{What Would and Would Not Fix It}
-The diagnosis implies an ordering of remedies. Fixing C3 (append EOS) is necessary for every variant but would not move the encoders off template behaviour, since it leaves C0--C2 untouched. Fixing C2 (an instruction that references the prefix) is free but similarly insufficient alone. The load-bearing changes are C0 and C1 together: freeze the decoder (or adapt it only through low-rank updates) so the training signal is forced through the projector, and widen the prefix---per-statement rather than per-patch tokens, or structure \emph{alongside} the code text rather than in place of it. A cheap confirmatory probe requiring no retraining is a prefix swap: computing training loss with the correct prefix versus one from a different sample; a near-zero difference would confirm from inside the model that conditioning is dead. We flag this as the first experiment for any follow-up.
+\subsection{Finally, What Would Fix It}
+The causes imply their own ordering of remedies. Fixing C3 (add the EOS token) helps every variant but does not touch the collapse. Fixing C2 (write a prompt that refers to the vectors) is free but also not enough. The changes that matter are C0 and C1 together: freeze the decoder, so the training signal must flow through the projector; and widen the prefix---one vector per statement instead of per patch, or better, structure \emph{added to} the code text rather than \emph{instead of} it. And before any retraining, one cheap check: compute training loss with the correct prefix and with a prefix taken from a different sample. If the difference is near zero, conditioning is dead. We suggest this as the first experiment for any follow-up.
 
 % ==================================================================
 \section{Discussion}
 \label{sec:discussion}
 
-\textbf{For dataset builders.} Round-trip execution equivalence is a practical, automatic acceptance criterion for LLM-generated code annotations: it requires only an interpreter, and it strictly strengthens the guarantee over similarity screening---an accepted description demonstrably contains enough information to reconstruct the program's behaviour. The two lessons that generalize beyond MATLAB: (i) the validator itself must be validated---without the static resolvability check, the 18{,}174 non-self-contained items it removed would have nearly tripled the round-trip pool with candidates whose ``passing'' executions could only be hollow; (ii) yield is the price---at 7.8\%, execution validation is a filter one runs at corpus scale, not a patch one applies to a fixed benchmark.
+\textbf{For dataset builders.} The round trip is a practical, automatic acceptance test for LLM-written code annotations. It needs only an interpreter, and it guarantees something overlap metrics cannot: an accepted description provably contains enough information to rebuild the program's behaviour. Two lessons travel beyond MATLAB. First, validate the validator: without the self-containedness check, 18{,}174 broken functions would have nearly tripled the round-trip pool, and their ``passes'' would have meant nothing. Second, expect low yield: at 7.8\%, this is a filter for corpus building, not a patch for an existing benchmark.
 
-\textbf{For model builders.} The negative result is a controlled demonstration of a failure mode that is easy to create and expensive to detect: a prefix-conditioned model whose aggregate metrics look like ``weak but working'' (0.17 ROUGE-L is far above zero) while its conditioning is entirely dead. Aggregate overlap metrics did not reveal this; input-dependence probes did---function-naming rate, shared-opening rate, mismatched-reference scoring---and all three are computable from stored generations in minutes, with no baseline construction a reviewer must accept on faith. We suggest them as standard sanity checks for any soft-prefix design.
+\textbf{For model builders.} Our negative result shows a failure that is easy to create and easy to miss. A collapsed model does not score zero---it scores 0.17, which looks like ``weak but working.'' Aggregate metrics did not expose it. Three cheap probes did: does the output name the function? do outputs share openings? does shuffling references change the score? All three run on stored generations in minutes. We recommend them as standard checks for any prefix-conditioned model.
 
-\textbf{What the dataset enables next.} Because every pair carries its harness and outputs, the dataset supports execution-grounded \emph{model} evaluation---scoring generated pseudocode by whether code regenerated from it reproduces the original outputs---which sidesteps reference-overlap metrics entirely and directly answers the objection that ROUGE against LLM-written references measures style agreement between two language models. Our released pipeline includes this evaluator; applying it to strong text-conditioned models is the natural next study.
+\textbf{What the dataset enables next.} Every pair ships with its harness and outputs. So the dataset supports execution-grounded \emph{model} evaluation: score a generated description by whether code rebuilt from it reproduces the original outputs. This removes reference-overlap metrics---and their known bias toward LLM writing style---entirely. Our released pipeline includes this evaluator. Applying it to strong text-conditioned models is the natural next study.
 
 % ==================================================================
 \section{Threats to Validity}
 \label{sec:threats}
 
-\textbf{Annotation source.} Descriptions are written by a single LLM; execution validation bounds their unfaithfulness but not their stylistic homogeneity, and overlap metrics against them partially measure style matching. The execution-grounded evaluation above is the mitigation.
+\textbf{One annotator model.} All descriptions come from one LLM. Execution validation bounds how wrong they can be, but not how uniform their style is, and overlap metrics partly reward matching that style.
 
-\textbf{Input coverage.} Each pair is validated on one generated input set with a fixed seed; equivalence on those inputs does not imply equivalence everywhere. The criterion is a high-precision screen, not a semantic proof.
+\textbf{One input set per pair.} The round trip checks behaviour on one generated input set. That is strong evidence of faithfulness, not proof of equivalence on all inputs.
 
-\textbf{Selection bias.} The funnel selects self-contained, deterministic, numerically observable functions of 5--100 lines; the dataset under-represents I/O-heavy, toolbox-dependent, and long-form MATLAB, and contains no flat scripts.
+\textbf{Selection bias.} The funnel keeps small, self-contained, deterministic, numeric functions. I/O-heavy, toolbox-dependent, and long MATLAB code is under-represented; flat scripts are absent.
 
-\textbf{Single training run.} Each variant was trained once (no multi-seed replication) under one hyperparameter configuration, and the encoder variants share the stage-1 initialization. The diagnosis of Section~\ref{sec:diagnosis} is correspondingly a diagnosis of this configuration---though C0's mechanism (unfrozen decoder out-competing a narrow prefix) is a general hazard, and the checkpoint-restoration path of the evaluator was explicitly verified to load all trained encoder parameters, ruling out an evaluation artefact.
+\textbf{One training run.} Each variant was trained once, with one hyperparameter setting, and the vector variants share the stage-1 initialization. The diagnosis describes this configuration. We separately verified that evaluation loaded all trained encoder weights, ruling out a checkpoint-loading artefact.
 
-\textbf{Metric ceiling.} The missing-EOS bug (C3) depresses all reported absolute scores; relative comparisons are unaffected since it applies to every variant.
+\textbf{Depressed absolute scores.} The missing-EOS bug (C3) lowers every absolute score. Relative comparisons are unaffected, since it applies to all variants equally.
 
 % ==================================================================
 \section{Conclusion}
 
-This paper contributes an execution-validated MATLAB$\to$pseudocode dataset---\NAccepted{} pairs in which every annotation is accepted only when an independent model can reconstruct behaviourally equivalent code from it, guarded by a static resolvability check that keeps the validation sound---and a controlled negative result obtained on it: three compressed soft-prefix schemes for injecting code structure into an LLM decoder all collapse to input-independent template generation, while ordinary text fine-tuning performs well. The collapse is not mysterious; it follows from training two billion decoder parameters against a six-vector prefix, and its signature is measurable with three cheap input-dependence probes we recommend to anyone building prefix-conditioned models. The dataset stands independently of the negative result---indeed, because of it: verified supervision is exactly what makes a failure of this kind attributable to the model rather than to the data.
+This paper told two connected stories. The first is about trust: we needed thousands of code descriptions, an LLM wrote them, and we made each one prove itself---by letting an independent model rebuild the code from the description alone and checking, by execution, that the rebuilt program behaves like the original. A static self-containedness check keeps that proof honest, and it mattered far more than expected, removing a quarter of the corpus. The result is \NAccepted{} pairs whose annotations are backed by runnable evidence.
+
+The second story is about a belief that did not survive contact with the first. We expected compressed structural vectors to help a decoder understand code, perhaps even to replace the code text. Instead, all three vector designs collapsed into writing the same generic pseudocode for every input, while plain text fine-tuning worked well. The explanation is simple in hindsight---two billion trainable decoder parameters against a six-vector prefix make memorization cheaper than understanding---and its signature is measurable with three probes that any prefix-conditioned project can run in minutes. The two stories need each other: only because the supervision was verified can the failure be pinned on the model, and not on the data.
 
 \section*{Acknowledgment}
 % TODO: acknowledgments / funding.
