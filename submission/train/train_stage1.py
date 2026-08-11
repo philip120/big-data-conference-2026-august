@@ -17,6 +17,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
+import math
 import torch
 from torch.utils.data import DataLoader
 import argparse
@@ -112,7 +113,6 @@ def train(
 
     # OneCycleLR scheduler
     # Use ceil to avoid off-by-one: integer division can undercount by 1
-    import math
     total_steps = math.ceil(epochs * len(loader) / grad_accum)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
@@ -159,10 +159,16 @@ def train(
             scaler.load_state_dict(ckpt['scaler'])
 
         global_step = ckpt.get('step', 0)
-        start_epoch = ckpt.get('epoch', 0)
         best_loss = ckpt.get('best_loss', float('inf'))
         loss_history = ckpt.get('loss_history', [])
         accumulation_step = global_step * grad_accum
+
+        # Derive the epoch from the optimizer-step count instead of trusting
+        # ckpt['epoch']: that field records the epoch a checkpoint was written
+        # *during*, so resuming from an end-of-epoch save (best_model.pt) would
+        # replay a finished epoch and overrun the OneCycle schedule.
+        steps_per_epoch = max(math.ceil(len(loader) / grad_accum), 1)
+        start_epoch = global_step // steps_per_epoch
 
         print(f"  Resumed at epoch {start_epoch + 1}, step {global_step}, best_loss {best_loss:.4f}")
 
@@ -203,7 +209,10 @@ def train(
                 torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
-                scheduler.step()
+                # OneCycleLR raises once stepped past total_steps; skipped
+                # samples on a resumed run can push us a few steps over.
+                if scheduler.last_epoch < total_steps:
+                    scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
 

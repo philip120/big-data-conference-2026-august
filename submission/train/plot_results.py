@@ -117,12 +117,19 @@ def load_exec(results_dir: Path) -> dict:
     return out
 
 
+# Hatching is off by default: flat colour reads better on screen and in colour
+# print. Identity never rests on colour alone regardless — every bar is named on
+# the x-axis or in the legend and carries a direct value label. Pass --hatch to
+# put the patterns back for grayscale print or a CVD-safe copy.
+USE_HATCH = False
+
+
 def style(name: str) -> tuple:
     """(label, color, hatch) for a model key, with a neutral fallback."""
     for key, label, color, hatch in MODELS:
         if key == name:
-            return label, color, hatch
-    return name, "#8a8a8a", "++"
+            return label, color, (hatch if USE_HATCH else "")
+    return name, "#8a8a8a", ("++" if USE_HATCH else "")
 
 
 def mean_sem(values: list) -> tuple:
@@ -370,6 +377,49 @@ def plot_ablations(ablation_dir: Path, out_dir: Path, width: float,
     save(fig, out_dir, "plot_ablations", table)
 
 
+# ---------------------------------------------------------------------------
+# Fig. 6 — score against how much of the generation is kept
+# ---------------------------------------------------------------------------
+
+def plot_length_curve(runs: dict, out_dir: Path, width: float,
+                      metric: str = "rougeL",
+                      ks: tuple = (40, 80, 120, 160, 200, 240, 280, 320, 400)):
+    """Truncating each generation to its first k words. Every model peaks before
+    the decode cap, so no EOS in the targets costs score rather than budget.
+    """
+    from rouge_score import rouge_scorer
+
+    scorer = rouge_scorer.RougeScorer([metric], use_stemmer=True)
+    fig, ax = plt.subplots(figsize=(width, 2.3))
+    table = [["model"] + [str(k) for k in ks]]
+
+    for name, samples in runs.items():
+        label, color, _hatch = style(name)
+        means = []
+        for k in ks:
+            means.append(sum(
+                scorer.score(s["reference_description"],
+                             " ".join(s["generated_description"].split()[:k])
+                             )[metric].fmeasure
+                for s in samples) / len(samples))
+        ax.plot(ks, means, color=color, linewidth=1.2, label=label,
+                marker="o", markersize=2.5)
+        gen_len = sum(len(s["generated_description"].split())
+                      for s in samples) / len(samples)
+        peak = means.index(max(means))
+        ax.plot([ks[peak]], [means[peak]], marker="o", markersize=5,
+                color=color, markeredgecolor="white", markeredgewidth=0.8)
+        table.append([label] + [f"{m:.4f}" for m in means]
+                     + [f"mean_gen_words={gen_len:.0f}"])
+
+    ax.set_xlabel("Generation truncated to first $k$ words")
+    ax.set_ylabel("ROUGE-L")
+    ax.grid(alpha=0.25, color="#c3c2b7")
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, ncol=2, loc="lower right", handlelength=1.4)
+    save(fig, out_dir, "plot_length_curve", table)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Regenerate paper figures from eval results")
     parser.add_argument("--results_dir", type=str, required=True,
@@ -380,10 +430,16 @@ def main():
     parser.add_argument("--ablation_results_dir", type=str, default=None,
                         help="Dir of eval_<run>.json for the ablation checkpoints; "
                              "use held-out test scores instead of in-training BLEU")
+    parser.add_argument("--hatch", action="store_true",
+                        help="add hatch patterns to bars (grayscale-print copy); "
+                             "default is flat colour")
     parser.add_argument("--column", type=str, default="single",
                         choices=["single", "double"],
                         help="Figure width: IEEE single (3.5in) or full width (7.16in)")
     args = parser.parse_args()
+
+    global USE_HATCH
+    USE_HATCH = args.hatch
 
     results_dir = Path(args.results_dir)
     out_dir = Path(args.out_dir)
@@ -398,6 +454,7 @@ def main():
     print(f"Exec-match available for: {', '.join(execs) or 'none'}")
 
     plot_quality(runs, execs, out_dir, width)
+    plot_length_curve(runs, out_dir, width)
     plot_panels(runs, FIG4_PANELS, out_dir, "plot_efficiency", width,
                 stacked=args.column == "single")
     plot_panels(runs, FIG5_PANELS, out_dir, "combined_KV_Cache2", width,

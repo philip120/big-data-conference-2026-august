@@ -316,13 +316,16 @@ def has_likely_output(code: str) -> bool:
 
 
 def run_octave_script(code: str) -> tuple[str, bool]:
-    with tempfile.NamedTemporaryFile(suffix=".m", mode="w", delete=False, dir="/tmp") as f:
+    with tempfile.NamedTemporaryFile(
+        suffix=".m", mode="w", delete=False, dir="/tmp", encoding="utf-8"
+    ) as f:
         f.write(code)
         fname = f.name
     try:
         result = subprocess.run(
             ["octave", "--no-gui", "--quiet", fname],
             capture_output=True, text=True, timeout=OCTAVE_TIMEOUT,
+            encoding="utf-8", errors="replace",
         )
         return result.stdout.strip(), result.returncode == 0
     except subprocess.TimeoutExpired:
@@ -339,14 +342,15 @@ def run_octave_script(code: str) -> tuple[str, bool]:
 def run_with_harness(func_code: str, func_name: str, harness_body: str) -> tuple[str, bool, str]:
     """Write func_name.m + harness to isolated tmpdir, run harness. Returns (stdout, ok, stderr)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        (Path(tmpdir) / f"{func_name}.m").write_text(func_code)
+        (Path(tmpdir) / f"{func_name}.m").write_text(func_code, encoding="utf-8")
         wrapper = f"addpath('{tmpdir}');\n{harness_body}"
         wrapper_file = Path(tmpdir) / "run_it.m"
-        wrapper_file.write_text(wrapper)
+        wrapper_file.write_text(wrapper, encoding="utf-8")
         try:
             result = subprocess.run(
                 ["octave", "--no-gui", "--quiet", str(wrapper_file)],
                 capture_output=True, text=True, timeout=OCTAVE_TIMEOUT,
+                encoding="utf-8", errors="replace",
             )
             return result.stdout.strip(), result.returncode == 0, result.stderr.strip()
         except subprocess.TimeoutExpired:
@@ -472,7 +476,10 @@ def save_audit_sample(n: int):
 
 def main():
     try:
-        r = subprocess.run(["octave", "--version"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(
+            ["octave", "--version"], capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
+        )
         print(f"Octave: {r.stdout.split(chr(10))[0].strip()}")
     except FileNotFoundError:
         print("ERROR: Octave not installed. Run:  brew install octave")
