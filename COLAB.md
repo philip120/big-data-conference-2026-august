@@ -78,11 +78,27 @@ the 2022 transformers API and only the unused encoder stack depends on it.
 Fetch the weights once (Google Drive, ~1 GB) and point the flag at them:
 
 ```python
-!pip install -q gdown
-!mkdir -p $RUN/structcoder
-!gdown --id 10Jee9uv4-XuqecWTlKvo1CeNQh1hOXEs -O $RUN/structcoder/structcoder_pretrain.bin
-import os; os.environ["STRUCTCODER_CKPT"] = f"{RUN}/structcoder/structcoder_pretrain.bin"
+import os, glob, subprocess
+SC_DIR = f"{RUN}/structcoder"; os.makedirs(SC_DIR, exist_ok=True)
+found = sorted(glob.glob(f"{SC_DIR}/*.bin"))
+if not found:
+    subprocess.run(["pip","install","-q","gdown"], check=True)
+    subprocess.run(["gdown","--id","10Jee9uv4-XuqecWTlKvo1CeNQh1hOXEs",
+                    "-O",f"{SC_DIR}/structcoder_pretrain.bin"], check=True)
+    found = sorted(glob.glob(f"{SC_DIR}/*.bin"))
+
+SC_CKPT = found[0] if found else None
+SC_FLAG = f"--structcoder_ckpt {SC_CKPT}" if SC_CKPT else ""
+if SC_CKPT:
+    os.environ["STRUCTCODER_CKPT"] = SC_CKPT
+print("checkpoint:", SC_CKPT)
 ```
+
+Interpolate `{SC_FLAG}` into the `!` cells below, **not** `$STRUCTCODER_CKPT`:
+an unset shell var expands to nothing, and argparse then reports
+`--structcoder_ckpt: expected one argument`, which does not name the cause.
+`{SC_FLAG}` is empty when there is no checkpoint, so the run degrades to plain
+CodeT5-base with the decoder's warning instead of dying three cells later.
 
 Without a checkpoint everything still runs, on plain `Salesforce/codet5-base`,
 and the decoder prints a loud warning. That is a legitimate ablation — it
@@ -92,7 +108,7 @@ StructCoder, so do not report it as one.
 Pre-flight before spending GPU hours (CPU, ~1 min, nonzero exit on failure):
 
 ```bash
-!python -m train.test_structcoder --structcoder_ckpt $STRUCTCODER_CKPT
+!python -m train.test_structcoder {SC_FLAG}
 ```
 
 Then stage 1 and the four variants. LoRA on a 220M seq2seq buys nothing, so
@@ -104,13 +120,13 @@ read.
 
 ```bash
 !python -m train.train_stage1 \
-  --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+  --decoder structcoder {SC_FLAG} \
   --unfreeze_layers 12 \
   --epochs 6 --lr 1e-4 --grad_accum 8 --weight_decay 0.05 \
   --save_dir $RUN/structcoder/checkpoints_stage1
 
 !python -m train.train_full --s2_model vit \
-    --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+    --decoder structcoder {SC_FLAG} \
     --unfreeze_layers 12 \
     --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt \
     --s2_save_dir $RUN/structcoder/checkpoints_stage2
@@ -127,7 +143,7 @@ is 0, so go through `train_pipeline`, where `--lora` is opt-in:
 
 ```bash
 !python -m train.train_pipeline --model vit \
-    --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+    --decoder structcoder {SC_FLAG} \
     --unfreeze_layers 0 \
     --epochs 10 --lr 3e-4 --bottleneck 768 --dropout 0.05 --grad_accum 8 \
     --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt \

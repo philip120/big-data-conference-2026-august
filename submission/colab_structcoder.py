@@ -13,8 +13,9 @@ Qwen is decoder-only: the encoder pipeline conditions it by prepending ~5 soft
 tokens to the prompt, and 2.2B trainable decoder params sit downstream of that
 prefix. StructCoder is a CodeT5-base-shaped seq2seq: the soft tokens are the
 *encoder input*, every decoder layer cross-attends to them, and the whole
-decoder is 138M trainable params. Measured ratio of decoder-trainable to
-encoder-trainable params drops from ~150x (qwen) to ~9-11x (structcoder).
+decoder is 138M trainable params — a 16x cut, so every variant's
+decoder-to-encoder trainable ratio improves by 16x (combined 149x -> 9.3x,
+tree/tree_text 178x -> 11.1x, vit 934x -> 58.4x).
 The T5 tokenizer also appends </s>, so the missing-EOS bug does not apply.
 """
 
@@ -56,9 +57,22 @@ if not found:
                    check=True)
     found = sorted(glob.glob(f"{SC_DIR}/*.bin"))
 
-SC_CKPT = found[0]
-os.environ["STRUCTCODER_CKPT"] = SC_CKPT
-print("StructCoder checkpoint:", SC_CKPT, os.path.getsize(SC_CKPT) / 1e6, "MB")
+SC_CKPT = found[0] if found else None
+
+# SC_FLAG is what the training cells interpolate. Defining it here means a
+# missing checkpoint degrades to "run on plain CodeT5-base with a warning"
+# instead of producing an argparse error three cells later. Never write
+# $STRUCTCODER_CKPT in a ! line: an unset shell var expands to nothing and
+# argparse reports "expected one argument", which does not name the cause.
+SC_FLAG = f"--structcoder_ckpt {SC_CKPT}" if SC_CKPT else ""
+
+if SC_CKPT:
+    os.environ["STRUCTCODER_CKPT"] = SC_CKPT
+    print("StructCoder checkpoint:", SC_CKPT,
+          round(os.path.getsize(SC_CKPT) / 1e6), "MB")
+else:
+    print("NO StructCoder checkpoint — will run on plain Salesforce/codet5-base.")
+    print("That is a valid ablation but it is NOT StructCoder.")
 
 # If the Drive link is rate-limited, download it by hand in a browser and
 # upload to $RUN/structcoder/ — the glob above picks it up on the next run.
@@ -70,7 +84,7 @@ print("StructCoder checkpoint:", SC_CKPT, os.path.getsize(SC_CKPT) / 1e6, "MB")
 # CELL 3 — pre-flight (CPU, ~1 min). Do this before burning GPU hours.
 # ============================================================
 """
-!python -m train.test_structcoder --structcoder_ckpt $STRUCTCODER_CKPT
+!python -m train.test_structcoder {SC_FLAG}
 # Confirms: the checkpoint loads, both adaptation modes work, the checkpoint
 # roundtrip evaluate.py performs works, and gradient reaches the encoder in
 # all four stage-2 models. Nonzero exit = do not start training.
@@ -85,7 +99,7 @@ print("StructCoder checkpoint:", SC_CKPT, os.path.getsize(SC_CKPT) / 1e6, "MB")
 # (passing 18, as the qwen recipe does, just clamps to 12 with a note).
 # lr 1e-4: T5 tolerates a higher LR than a 4B decoder-only model.
 !python -m train.train_stage1 \
-  --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+  --decoder structcoder {SC_FLAG} \
   --unfreeze_layers 12 \
   --epochs 6 --lr 1e-4 --grad_accum 8 --weight_decay 0.05 \
   --save_dir $RUN/structcoder/checkpoints_stage1
@@ -100,7 +114,7 @@ S2 = f"{RUN}/structcoder/checkpoints_stage2"
 
 for m in ("vit", "tree", "combined", "tree_text"):
     !python -m train.train_full --s2_model {m} \
-        --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+        --decoder structcoder {SC_FLAG} \
         --unfreeze_layers 12 --qwen_lr 1e-5 \
         --stage1_checkpoint {S1} \
         --s2_save_dir {S2}
@@ -109,14 +123,14 @@ for m in ("vit", "tree", "combined", "tree_text"):
 # The same thing as plain cells, if you prefer them one per variant:
 """
 !python -m train.train_full --s2_model vit \
-    --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+    --decoder structcoder {SC_FLAG} \
     --unfreeze_layers 12 \
     --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt \
     --s2_save_dir $RUN/structcoder/checkpoints_stage2
-!python -m train.train_full --s2_model tree      --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT --unfreeze_layers 12 --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt --s2_save_dir $RUN/structcoder/checkpoints_stage2
-!python -m train.train_full --s2_model combined  --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT --unfreeze_layers 12 --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt --s2_save_dir $RUN/structcoder/checkpoints_stage2
+!python -m train.train_full --s2_model tree      --decoder structcoder {SC_FLAG} --unfreeze_layers 12 --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt --s2_save_dir $RUN/structcoder/checkpoints_stage2
+!python -m train.train_full --s2_model combined  --decoder structcoder {SC_FLAG} --unfreeze_layers 12 --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt --s2_save_dir $RUN/structcoder/checkpoints_stage2
 !python -m train.train_full --s2_model tree_text \
-    --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+    --decoder structcoder {SC_FLAG} \
     --unfreeze_layers 12 \
     --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt \
     --s2_save_dir $RUN/structcoder/checkpoints_stage2
@@ -132,7 +146,7 @@ for m in ("vit", "tree", "combined", "tree_text"):
 # --lora is opt-in and omitting it leaves the decoder fully frozen.
 for m in ("vit", "tree", "combined", "tree_text"):
     !python -m train.train_pipeline --model {m} \
-        --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+        --decoder structcoder {SC_FLAG} \
         --unfreeze_layers 0 \
         --epochs 10 --lr 3e-4 --bottleneck 768 --dropout 0.05 --grad_accum 8 \
         --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt \
@@ -155,7 +169,8 @@ def evaluate(model_type, ckpt):
     os.makedirs(SC_RESULTS, exist_ok=True)
     cmd = ["python", "-m", "train.evaluate", "--model_type", model_type,
            "--checkpoint", ckpt, "--num_samples", "1000",
-           "--decoder", "structcoder", "--structcoder_ckpt", os.environ["STRUCTCODER_CKPT"],
+           "--decoder", "structcoder",
+           *(["--structcoder_ckpt", SC_CKPT] if SC_CKPT else []),
            "--results_dir", SC_RESULTS]
     print(">>", " ".join(cmd), flush=True)
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
