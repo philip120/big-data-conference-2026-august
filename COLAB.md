@@ -54,6 +54,88 @@ variant, reuse the stage-1 checkpoint (skips stage 1):
 Checkpoints/metrics/plots land in `$RUN/checkpoints_stage2/<model_type>/`.
 Resume an interrupted run with `--s2_resume <checkpoint.pt>`.
 
+## 1b. StructCoder decoder (`--decoder structcoder`)
+
+An encoder-decoder alternative to Qwen. Same four stage-2 variants, same
+scripts; only the decoder changes. Worth running because it removes the two
+structural problems behind the negative Qwen result: the soft tokens become
+the *encoder input* that every decoder layer cross-attends to (rather than a
+~5-token prefix on a decoder-only stream that the prompt never refers to), and
+the decoder is 138M trainable params instead of 2.2B — measured
+decoder-to-encoder trainable ratio drops from ~150x to ~9-11x. The T5
+tokenizer also appends `</s>`, so the missing-EOS bug does not apply here.
+
+Note what does and does not transfer from StructCoder. Its structure-aware
+*encoder* needs a tree-sitter grammar for the source language and there is no
+MATLAB one in the released parser blobs — and in this pipeline the encoder is
+our own ViT/tree/combined model anyway. Its auxiliary heads predict the AST and
+data flow of the *target*, and our target is English pseudocode. So what is
+loaded is the half that the structure-based denoising objective pretrained:
+`shared` + `decoder` + `lm_head`, on a stock CodeT5-base skeleton. Their
+`modeling_structcoder.py` is not imported; it subclasses `T5Attention` against
+the 2022 transformers API and only the unused encoder stack depends on it.
+
+Fetch the weights once (Google Drive, ~1 GB) and point the flag at them:
+
+```python
+!pip install -q gdown
+!mkdir -p $RUN/structcoder
+!gdown --id 10Jee9uv4-XuqecWTlKvo1CeNQh1hOXEs -O $RUN/structcoder/structcoder_pretrain.bin
+import os; os.environ["STRUCTCODER_CKPT"] = f"{RUN}/structcoder/structcoder_pretrain.bin"
+```
+
+Without a checkpoint everything still runs, on plain `Salesforce/codet5-base`,
+and the decoder prints a loud warning. That is a legitimate ablation — it
+isolates what the structure-aware pretraining is worth — but it is not
+StructCoder, so do not report it as one.
+
+Pre-flight before spending GPU hours (CPU, ~1 min, nonzero exit on failure):
+
+```bash
+!python -m train.test_structcoder --structcoder_ckpt $STRUCTCODER_CKPT
+```
+
+Then stage 1 and the four variants. LoRA on a 220M seq2seq buys nothing, so
+full fine-tune the decoder stack: `--unfreeze_layers 12` is all CodeT5 decoder
+blocks + `final_layer_norm` + `lm_head` (passing 18, as the Qwen recipe does,
+just clamps to 12 with a note). Everything goes under `$RUN/structcoder` so it
+cannot overwrite the Qwen checkpoints or the `eval_*.json` the paper figures
+read.
+
+```bash
+!python -m train.train_stage1 \
+  --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+  --unfreeze_layers 12 \
+  --epochs 6 --lr 1e-4 --grad_accum 8 --weight_decay 0.05 \
+  --save_dir $RUN/structcoder/checkpoints_stage1
+
+!python -m train.train_full --s2_model vit \
+    --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+    --unfreeze_layers 12 \
+    --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt \
+    --s2_save_dir $RUN/structcoder/checkpoints_stage2
+```
+
+…and the same for `tree`, `combined`, `tree_text`. Evaluate into a separate
+results dir (`--results_dir $RUN/results_structcoder --decoder structcoder`)
+so the two decoders' numbers stay side by side rather than on top of each
+other. `submission/colab_structcoder.py` has every cell ready to paste.
+
+Optional control for the capacity-asymmetry claim: a fully frozen decoder,
+projector only. `train_full` always switches to LoRA when `--unfreeze_layers`
+is 0, so go through `train_pipeline`, where `--lora` is opt-in:
+
+```bash
+!python -m train.train_pipeline --model vit \
+    --decoder structcoder --structcoder_ckpt $STRUCTCODER_CKPT \
+    --unfreeze_layers 0 \
+    --epochs 10 --lr 3e-4 --bottleneck 768 --dropout 0.05 --grad_accum 8 \
+    --stage1_checkpoint $RUN/structcoder/checkpoints_stage1/best_model.pt \
+    --save_dir $RUN/structcoder/frozen/vit
+```
+
+GPU: an L4 is plenty — CodeT5-base is 220M against Qwen3-4B.
+
 ## 2. Ablations (reviewer-requested)
 
 ```bash

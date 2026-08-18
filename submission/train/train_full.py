@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import argparse
 from pathlib import Path
 
+from shared.decoder_factory import DECODER_CHOICES
 from train.train_stage1 import train as train_stage1
 from train.train_pipeline import train as train_stage2
 
@@ -78,8 +79,14 @@ if __name__ == "__main__":
                         help="Resume Stage 2 from this checkpoint")
 
     parser.add_argument("--decoder", type=str, default="qwen",
-                        choices=["gemma", "qwen"],
-                        help="Decoder model: gemma or qwen")
+                        choices=DECODER_CHOICES,
+                        help="Decoder: gemma / qwen (decoder-only, soft-prefix "
+                             "conditioning) or structcoder (CodeT5-base seq2seq, "
+                             "cross-attention conditioning)")
+    parser.add_argument("--structcoder_ckpt", type=str, default=None,
+                        help="Path to the released StructCoder weights "
+                             "(defaults to $STRUCTCODER_CKPT, then "
+                             "saved_models/pretrain/pytorch_model.bin)")
     parser.add_argument("--split", type=str, default="train")
 
     args = parser.parse_args()
@@ -110,6 +117,7 @@ if __name__ == "__main__":
             resume=args.s1_resume,
             decoder_name=args.decoder,
             unfreeze_layers=args.unfreeze_layers,
+            structcoder_ckpt=args.structcoder_ckpt,
         )
     else:
         print(f"\nSkipping Stage 1. Using checkpoint: {s1_best}")
@@ -149,6 +157,7 @@ if __name__ == "__main__":
         projector_arch=args.projector,
         encoder_name=args.code_encoder,
         max_branching=args.max_branching,
+        structcoder_ckpt=args.structcoder_ckpt,
     )
 
     print("\n" + "#" * 60)

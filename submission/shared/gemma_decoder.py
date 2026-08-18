@@ -148,6 +148,22 @@ class GemmaDecoder:
                 state[k] = v
         return state
 
+    @staticmethod
+    def count_unfrozen_layers(state_dict) -> int:
+        """How many transformer layers a saved `qwen_state` covers.
+
+        evaluate.py rebuilds the same unfrozen set before loading, and the key
+        layout differs per decoder — decoder-only models use `model.layers.{i}.`,
+        the seq2seq one uses `decoder.block.{i}.`.
+        """
+        idxs = set()
+        for k in state_dict:
+            parts = k.split(".")
+            for a, b in zip(parts, parts[1:]):
+                if a == "layers" and b.isdigit():
+                    idxs.add(int(b))
+        return len(idxs)
+
     def load_unfrozen_state_dict(self, state_dict):
         """Load unfrozen Gemma layer weights from checkpoint."""
         if not self.unfrozen_enabled or not state_dict:

@@ -36,6 +36,7 @@ from nltk.translate.chrf_score import sentence_chrf
 import importlib
 _decoder_factory = importlib.import_module("shared.decoder_factory")
 create_decoder = _decoder_factory.create_decoder
+DECODER_CHOICES = _decoder_factory.DECODER_CHOICES
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -105,12 +106,10 @@ def load_stage2_model(checkpoint_path, lora_rank, lora_alpha, lora_dropout,
 
     # Restore LoRA or unfrozen decoder weights
     if "qwen_state" in ckpt and ckpt["qwen_state"]:
-        unfrozen_idxs = set()
-        for k in ckpt["qwen_state"]:
-            parts = k.split(".")
-            if len(parts) > 2 and parts[0] == "model" and parts[1] == "layers":
-                unfrozen_idxs.add(int(parts[2]))
-        model.decoder.unfreeze_layers(len(unfrozen_idxs))
+        # The decoder knows its own key layout (`model.layers.{i}.` for
+        # decoder-only, `decoder.block.{i}.` for the seq2seq one).
+        n_unfrozen = model.decoder.count_unfrozen_layers(ckpt["qwen_state"])
+        model.decoder.unfreeze_layers(n_unfrozen)
         model.decoder.load_unfrozen_state_dict(ckpt["qwen_state"])
         print(f"Restored {len(ckpt['qwen_state'])} unfrozen decoder tensors")
     elif "lora_state" in ckpt and ckpt["lora_state"]:
@@ -132,12 +131,8 @@ def load_stage1_decoder(checkpoint_path, lora_rank, lora_alpha, lora_dropout,
     decoder = create_decoder(decoder_name, device=DEVICE)
 
     if "qwen_state" in ckpt and ckpt["qwen_state"]:
-        unfrozen_idxs = set()
-        for k in ckpt["qwen_state"]:
-            parts = k.split(".")
-            if len(parts) > 2 and parts[0] == "model" and parts[1] == "layers":
-                unfrozen_idxs.add(int(parts[2]))
-        decoder.unfreeze_layers(len(unfrozen_idxs))
+        n_unfrozen = decoder.count_unfrozen_layers(ckpt["qwen_state"])
+        decoder.unfreeze_layers(n_unfrozen)
         decoder.load_unfrozen_state_dict(ckpt["qwen_state"])
         print(f"Restored {len(ckpt['qwen_state'])} unfrozen decoder tensors")
     elif "lora_state" in ckpt and ckpt["lora_state"]:
@@ -154,6 +149,12 @@ def load_stage1_decoder(checkpoint_path, lora_rank, lora_alpha, lora_dropout,
 def generate_stage1(decoder, code: str, max_new_tokens: int = 128):
     """Generate pseudocode using Stage 1 decoder (text-only, no encoder).
     Returns (text, efficiency_metrics)."""
+    # Seq2seq decoders expose generate_text: the logic below is decoder-only
+    # (slice the prompt off the output, read config.num_key_value_heads) and
+    # produces wrong text and wrong KV numbers for an encoder-decoder model.
+    if hasattr(decoder, "generate_text"):
+        return decoder.generate_text(code, max_new_tokens=max_new_tokens)
+
     prompt = f"Convert the following MATLAB code to step-by-step pseudocode:\n{code}\nPseudocode:"
     tokens = decoder.tokenizer(
         prompt, return_tensors="pt", truncation=True, max_length=512
@@ -235,7 +236,12 @@ def main():
     parser.add_argument("--bottleneck", type=int, default=768)
     parser.add_argument("--dropout", type=float, default=0.05)
     parser.add_argument("--decoder", type=str, default=None,
-                        choices=["gemma", "qwen"])
+                        choices=DECODER_CHOICES,
+                        help="Override the decoder recorded in the checkpoint")
+    parser.add_argument("--structcoder_ckpt", type=str, default=None,
+                        help="Path to the released StructCoder weights "
+                             "(defaults to $STRUCTCODER_CKPT, then "
+                             "saved_models/pretrain/pytorch_model.bin)")
 
     args = parser.parse_args()
     if args.output_path:
@@ -244,6 +250,11 @@ def main():
         from pathlib import Path
         Path(args.results_dir).mkdir(parents=True, exist_ok=True)
         output_path = str(Path(args.results_dir) / f"eval_{args.model_type}.json")
+
+    if args.structcoder_ckpt:
+        # Model classes construct their decoder internally; StructCoderDecoder
+        # resolves this env var when no path is passed directly.
+        os.environ["STRUCTCODER_CKPT"] = args.structcoder_ckpt
 
     print(f"Evaluating: {args.model_type}")
     print(f"Checkpoint: {args.checkpoint}")

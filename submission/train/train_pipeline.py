@@ -31,6 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
+from shared.decoder_factory import DECODER_CHOICES
 from train.load_dataset import load_matlab_nl_dataset
 from train.matlab_dataset import MatlabPseudocodeDataset
 
@@ -119,6 +120,7 @@ def train(
     projector_arch: str = "linear",
     encoder_name: str = "codebert",
     max_branching: int = 8,
+    structcoder_ckpt: str = None,
 ):
     """Main training function."""
     print("=" * 60)
@@ -163,6 +165,11 @@ def train(
     # Create model
     print("\n" + "=" * 60)
     print("Creating model...")
+    if structcoder_ckpt:
+        # The model classes build their own decoder via create_decoder() and
+        # take no decoder-specific kwargs, so pass the path through the env
+        # channel StructCoderDecoder already resolves.
+        os.environ["STRUCTCODER_CKPT"] = structcoder_ckpt
     model = create_model(model_type, patch_size, bottleneck_dim, dropout, decoder_name,
                          projector_arch, encoder_name, max_branching)
 
@@ -617,8 +624,13 @@ if __name__ == "__main__":
 
     # Decoder
     parser.add_argument("--decoder", type=str, default="qwen",
-                        choices=["gemma", "qwen"],
-                        help="Decoder model: gemma (Gemma-2B) or qwen (Qwen3-4B)")
+                        choices=DECODER_CHOICES,
+                        help="Decoder: gemma (Gemma-2B) / qwen (Qwen3-4B) decoder-only, "
+                             "or structcoder (CodeT5-base seq2seq, cross-attention)")
+    parser.add_argument("--structcoder_ckpt", type=str, default=None,
+                        help="Path to the released StructCoder weights "
+                             "(defaults to $STRUCTCODER_CKPT, then "
+                             "saved_models/pretrain/pytorch_model.bin)")
 
     # LoRA
     parser.add_argument("--lora", action="store_true", help="Enable LoRA on decoder")
@@ -671,4 +683,5 @@ if __name__ == "__main__":
         projector_arch=args.projector,
         encoder_name=args.code_encoder,
         max_branching=args.max_branching,
+        structcoder_ckpt=args.structcoder_ckpt,
     )

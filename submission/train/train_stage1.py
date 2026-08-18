@@ -28,7 +28,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from train.matlab_dataset import MatlabPseudocodeDataset
-from shared.decoder_factory import create_decoder
+from shared.decoder_factory import create_decoder, DECODER_CHOICES
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -52,6 +52,7 @@ def train(
     resume: str = None,
     decoder_name: str = "qwen",
     unfreeze_layers: int = 0,
+    structcoder_ckpt: str = None,
 ):
     """Stage 1 training: text-only decoder fine-tuning."""
     print("=" * 60)
@@ -92,7 +93,8 @@ def train(
     # Load decoder
     print("\n" + "=" * 60)
     print(f"Loading {decoder_name} decoder...")
-    decoder = create_decoder(decoder_name, device=DEVICE)
+    decoder = create_decoder(decoder_name, device=DEVICE,
+                             structcoder_ckpt=structcoder_ckpt)
 
     if unfreeze_layers > 0:
         decoder.unfreeze_layers(unfreeze_layers)
@@ -327,8 +329,13 @@ if __name__ == "__main__":
     parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--decoder", type=str, default="qwen",
-                        choices=["gemma", "qwen"],
-                        help="Decoder model: gemma or qwen")
+                        choices=DECODER_CHOICES,
+                        help="Decoder model: qwen/gemma (decoder-only) or "
+                             "structcoder (seq2seq, CodeT5-base scale)")
+    parser.add_argument("--structcoder_ckpt", type=str, default=None,
+                        help="Path to the released StructCoder weights "
+                             "(defaults to $STRUCTCODER_CKPT, then "
+                             "saved_models/pretrain/pytorch_model.bin)")
     parser.add_argument("--unfreeze_layers", type=int, default=0,
                         help="Unfreeze last N decoder layers fully (replaces LoRA)")
 
@@ -350,4 +357,5 @@ if __name__ == "__main__":
         resume=args.resume,
         decoder_name=args.decoder,
         unfreeze_layers=args.unfreeze_layers,
+        structcoder_ckpt=args.structcoder_ckpt,
     )
