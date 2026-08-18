@@ -52,9 +52,14 @@ FILE_ID = "10Jee9uv4-XuqecWTlKvo1CeNQh1hOXEs"
 found = sorted(glob.glob(f"{SC_DIR}/*.bin") + glob.glob(f"{SC_DIR}/*.pt")
                + glob.glob(f"{SC_DIR}/*.pth"))
 if not found:
-    subprocess.run(["pip", "install", "-q", "gdown"], check=True)
-    subprocess.run(["gdown", "--id", FILE_ID, "-O", f"{SC_DIR}/structcoder_pretrain.bin"],
-                   check=True)
+    # As of 2026-08-18 this Drive link 404s and gdown reports it is no longer
+    # publicly retrievable, so expect this to fail and fall through. Note the
+    # id goes positionally: `gdown --id` was REMOVED in gdown 5.x, and passing
+    # it to the version Colab ships aborts the cell with an argparse error —
+    # which then leaves SC_CKPT undefined several cells later.
+    subprocess.run(["pip", "install", "-q", "gdown"], check=False)
+    subprocess.run(["gdown", FILE_ID, "-O", f"{SC_DIR}/structcoder_pretrain.bin"],
+                   check=False)          # check=False: fall back, do not abort
     found = sorted(glob.glob(f"{SC_DIR}/*.bin"))
 
 SC_CKPT = found[0] if found else None
@@ -74,10 +79,15 @@ else:
     print("NO StructCoder checkpoint — will run on plain Salesforce/codet5-base.")
     print("That is a valid ablation but it is NOT StructCoder.")
 
-# If the Drive link is rate-limited, download it by hand in a browser and
-# upload to $RUN/structcoder/ — the glob above picks it up on the next run.
-# Without it everything still runs, on plain Salesforce/codet5-base, and the
-# decoder prints a loud warning. That is a valid ablation, not StructCoder.
+# The Drive link in the StructCoder README currently 404s. Try it in a browser
+# while signed in to Google; if you get the file, upload it to
+# $RUN/structcoder/ and the glob above picks it up on the next run.
+#
+# If you cannot get it, that is not a blocker — it just means the run is plain
+# Salesforce/codet5-base, which is arguably the better control anyway: it
+# changes exactly one variable (decoder-only soft prefix -> seq2seq
+# cross-attention) instead of two. Report it as CodeT5-base, never as
+# StructCoder.
 """
 
 # ============================================================

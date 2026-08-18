@@ -82,9 +82,11 @@ import os, glob, subprocess
 SC_DIR = f"{RUN}/structcoder"; os.makedirs(SC_DIR, exist_ok=True)
 found = sorted(glob.glob(f"{SC_DIR}/*.bin"))
 if not found:
-    subprocess.run(["pip","install","-q","gdown"], check=True)
-    subprocess.run(["gdown","--id","10Jee9uv4-XuqecWTlKvo1CeNQh1hOXEs",
-                    "-O",f"{SC_DIR}/structcoder_pretrain.bin"], check=True)
+    # id is POSITIONAL: `gdown --id` was removed in gdown 5.x.
+    # check=False: the link currently 404s, so fall through rather than abort.
+    subprocess.run(["pip","install","-q","gdown"], check=False)
+    subprocess.run(["gdown","10Jee9uv4-XuqecWTlKvo1CeNQh1hOXEs",
+                    "-O",f"{SC_DIR}/structcoder_pretrain.bin"], check=False)
     found = sorted(glob.glob(f"{SC_DIR}/*.bin"))
 
 SC_CKPT = found[0] if found else None
@@ -100,10 +102,15 @@ an unset shell var expands to nothing, and argparse then reports
 `{SC_FLAG}` is empty when there is no checkpoint, so the run degrades to plain
 CodeT5-base with the decoder's warning instead of dying three cells later.
 
+**As of 2026-08-18 that Drive link 404s** and gdown reports it is no longer
+publicly retrievable, so expect the download to fail. Try it in a browser while
+signed in to Google; if you get the file, upload it to `$RUN/structcoder/`.
+
 Without a checkpoint everything still runs, on plain `Salesforce/codet5-base`,
-and the decoder prints a loud warning. That is a legitimate ablation — it
-isolates what the structure-aware pretraining is worth — but it is not
-StructCoder, so do not report it as one.
+and the decoder prints a loud warning. That is not a blocker — it is arguably
+the better control, since it changes exactly one variable (decoder-only soft
+prefix -> seq2seq cross-attention) rather than two. Report such a run as
+CodeT5-base, never as StructCoder.
 
 Pre-flight before spending GPU hours (CPU, ~1 min, nonzero exit on failure):
 
